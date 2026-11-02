@@ -199,7 +199,8 @@ endif
 else   # not windows
 
 $(LIBLZ4): override CPPFLAGS += $(DYNLIB_MT_FLAGS)   # also when CPPFLAGS is set on the command line
-$(LIBLZ4): LDFLAGS += -fvisibility=hidden $(SONAME_FLAGS) $(filter -pthread,$(DYNLIB_MT_FLAGS))
+$(LIBLZ4): override CPPFLAGS += -fvisibility=hidden  # compiles the objects : only API functions (LZ4LIB_API, LZ4FLIB_API) are exported
+$(LIBLZ4): LDFLAGS += $(SONAME_FLAGS) $(filter -pthread,$(DYNLIB_MT_FLAGS))
 ifeq ($(BUILD_SHARED),yes)
 $(eval $(call c_dynamic_library,$(LIBLZ4),$(OBJFILES),,echo "$(LIBLZ4) created $(DYNLIB_MT_MSG)",$(DYNLIB_MT_FLAGS)))
 endif
