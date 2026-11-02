@@ -1,116 +1,33 @@
 v1.11.0
-fix  : decoding into a ring buffer of `LZ4_decoderRingBufferSize()` could corrupt data (since v1.9.0)
-fix  : `LZ4_compress_fast_continue()` produced wrong data when a block overwrote its whole previous block
-fix  : `LZ4_compress_destSize_extState()` corrupted data with `acceleration <= 0`, and could read out of bounds (since v1.10.0)
-fix  : negative sizes crashed `LZ4_decompress_safe_partial()` (since v1.9.3) and `LZ4_decompress_fast()` (since v1.9.4)
-fix  : `LZ4_saveDict()` with a negative `dictSize` copied up to 64 KB into `safeBuffer`, by @arthuz-th
-fix  : `LZ4_saveDictHC()` before any compression (new or reset stream) corrupted the next compressed block
-fix  : deprecated `LZ4_compressHC2_continue()` crashed after `LZ4_slideInputBufferHC()` (since v1.8.2)
-fix  : `LZ4_compress_HC_continue_destSize()` corrupted the next block after a call which didn't consume its whole input (since v1.8.0), reported by @freedom-winds
-fix  : `LZ4_decompress_safe_partial()` could leave previous `dst` content in decoded data with an invalid offset 0 (since v1.8.3)
-fix  : heap overflow with an invalid `blockSizeID` in `LZ4F_compressBegin()` and `LZ4F_writeOpen()`, by @jaypatrickhoward
-fix  : `LZ4F_compressBegin()` failing on allocation left an inconsistent frame in progress : it is now invalidated
-fix  : `LZ4F_uncompressedUpdate()` mixed with `LZ4F_compressUpdate()` could exceed `LZ4F_compressBound()`
-fix  : `LZ4F_compressBegin()` could crash after a previous call failed to allocate its state (custom allocator)
-fix  : `LZ4F_uncompressedUpdate()` supports linked blocks (it could produce corrupted frames, without error)
-fix  : `LZ4F_compressBegin_usingDict()` ignored the dictionary with independent blocks : each block now uses it, as with a CDict (also multithreaded)
-fix  : single-thread `lz4` could truncate concatenated frames with block checksums (wrong decompression hints)
-fix  : `--favor-decSpeed` lost after the first block with `-BD`, and ignored with a dictionary
-fix  : poor compression by `LZ4_compress_fast_extState_fastReset()` after `LZ4_attach_dictionary()` on a new state
-fix  : fast levels could compress some periodic data 30x worse, notably with a dictionary (other data : ~0.3-0.8% better, ~1-8% slower), reported by @martinus
-fix  : level 12 very slow on short-period data with linked blocks, detected by OSS-Fuzz
-fix  : levels 10+ with `(NULL, 0)` input, reported by @rinsuki
-fix  : lz4frame functions check `NULL` arguments, by @louislafosse
-fix  : `LZ4F_readOpen()` accepts files smaller than 19 bytes, by @axiqia
-fix  : `LZ4F_read()` reports truncated files as an error (`ERROR_io_read`), instead of a clean end of file
-fix  : `LZ4F_writeClose()` reports an earlier `LZ4F_write()` failure, instead of success
-fix  : lz4frame levels `INT_MIN` and `INT_MIN+1` overflowed, and compressed at default speed instead of maximum acceleration, by @akashdeshmukh-git
-fix  : lz4frame `skipChecksums` also skips block checksums of compressed blocks (decompression up to +23% faster)
-fix  : C90 compilation of `lz4.c` with `LZ4_HEAPMODE=1` (since v1.10.0)
-perf : faster decompression on aarch64 and x86-64 (up to +19% on Neoverse-V2 and Zen 4), by @Nicoshev
-perf : `LZ4_FAST_DEC_LOOP` enabled on aarch64 with clang, including Android (up to +9% on Cortex-A5xx), by @Nicoshev and @arpadpanyik-arm
-perf : `LZ4_FAST_DEC_LOOP` enabled on riscv64 when unaligned accesses are fast (`-mno-strict-align`, or a `-mcpu` with fast unaligned accesses)
-perf : faster compression with reused contexts, for blocks >= 1 KB : linked frames (up to +69%), `LZ4_resetStream_fast()` (up to +94%)
-perf : faster compression at fast levels without dictionary (+1% to +7%), proposed by @BiplabRaut
-perf : faster compression of 2-4 KB blocks with `LZ4_attach_dictionary()` (+3% to +30% on Zen 4)
-perf : fast levels with an external dictionary (CDict, `LZ4_attach_dictionary()`, `LZ4_loadDict()`, ring buffers) : faster 4-16 KB blocks with gcc (+29% to +35%), 64 KB blocks with gcc (+12%), 256 KB to 4 MB blocks (+4% with gcc, +10% with clang) on Zen 4
-perf : `LZ4_attach_HC_dictionary()` copies the dictionary's tables from 4 KB blocks (2 KB at level 11, 1 KB at level 12) : level 2 compresses ~2.5% better at 4 KB, levels 11-12 up to 2x faster with a useful dictionary, level 10 slower at 4 KB (-3% to -11%)
-perf : level 2 compresses better (~0.2-1.5%), at similar speed (-3% to +1% on Zen 4)
-perf : faster levels 11 (~+25%) and 12 (~+10%)
-perf : `--favor-decSpeed` : faster decompression (~+2-4% at level 12), with fewer sequences
-perf : `lz4` multithreaded compression relies on liblz4, reading files in place (memory-mapped, `--[no-]mmap`) : faster at fast levels
-perf : lz4frame `autoFlush` with linked blocks keeps 64 KB of history across updates < 64 KB of unstable input : compresses as stable input does (1 KB updates of silesia.tar : -13% and +50% speed at level 1, -25% at level 9)
-perf : lz4frame decompression of small frames with a dictionary and linked blocks no longer saves the history of the last block (4 KB frames : 2x faster, 16 KB : +28% on Zen 4)
-perf : `LZ4F_compressBegin_usingDict()` with linked blocks (single-threaded) : buffered input references the dictionary in prefix mode (16 KB frames : +7% at level 1, +10% at level 12 on Zen 4), and fast levels keep it after the first block (`autoFlush` : ~1-2% smaller, up to +27% faster)
-api  : `LZ4_decompress_safe()` and its variants return distinct error codes : `-1` generic error (malformed input), `-2` `dstCapacity` too small, `-3` missing dictionary, instead of an undocumented input position
-api  : lz4frame compression accepts any `dstCapacity` : `LZ4F_compressFrame()` and `LZ4F_compressUpdate()` fail only if the output doesn't fit
-api  : `LZ4F_flush()` and `LZ4F_compressEnd()` fill `dstBuffer` or complete : below `LZ4F_compressBound(0)`, invoke them again while they return `dstCapacity`
-api  : `LZ4F_ERROR_dstMaxSize_tooSmall` renamed `LZ4F_ERROR_dstCapacity_tooSmall` (former name still supported)
-api  : lz4frame : after an error, and outside of a frame, compression operations fail until `LZ4F_compressBegin()`
-api  : lz4frame output no longer depends on the compression context's history
-api  : new static functions `LZ4F_cctx_size()` and `LZ4F_dctx_size()`, by @felixhandte
-api  : new static function `LZ4F_resumeFrame()` : resume decoding from any block start, for random access within frames
-api  : `lz4file` : new static functions `LZ4F_seek()` and `LZ4F_tell()`, for random access within compressed files
-api  : `lz4file` : new static functions `LZ4F_readOpen_advanced()` and `LZ4F_writeOpen_advanced()`, employing a custom allocator (`LZ4F_CustomMem`) for all their allocations, including their lz4frame context
-api  : `LZ4_ACCELERATION_DEFAULT` and `LZ4_ACCELERATION_MAX` are defined in `lz4.h` (static section)
-api  : new `LZ4F_preferences_t.nbWorkers` (experimental) : multithreaded lz4frame compression, same output for any `nbWorkers` >= 1 ; `LZ4F_compressBound()` counts jobs instead of blocks, independently of `nbWorkers`
-api  : new static function `LZ4F_getMaxNbWorkers()` : tells if liblz4 supports multithreaded compression
-api  : `LZ4F_compressOptions_t.stableSrc` : new value `LZ4F_srcStableUntilFlush`, letting worker threads read input in place
-api  : new `LZ4F_compressOptions_t.uncompressed` : `LZ4F_compressUpdate()` stores input as uncompressed blocks ; `LZ4F_uncompressedUpdate()` is deprecated ; `LZ4F_compressOptions_t` must be initialized to zero (`memset()`)
-api  : `LZ4_resetStream()` and `LZ4_resetStreamHC()` are deprecated (compilation warning) : use `LZ4_initStream()` and `LZ4_initStreamHC()`, or `LZ4_resetStream_fast()` and `LZ4_resetStreamHC_fast()` to start a new stream
-api  : removed from `lz4.h` and `lz4hc.h` : the 31 functions deprecated since v1.7.x and v1.8.0 (`LZ4_compress()`, `LZ4_compressHC()`, `LZ4_uncompress()`...) ; liblz4 still exports them, for programs linked to previous versions
-api  : removed the unprefixed lz4frame enums (`LZ4F_ENABLE_OBSOLETE_ENUMS`)
-api  : reserved fields of `LZ4F_preferences_t` and `LZ4F_compressOptions_t` are now scalars : flatten positional initializers `{ 0, 0, 0 }`
-api  : new static macro `LZ4_STREAMHC_EXTSIZE` : HC states initialized on this size include the temporary buffer of levels >= 10, which then allocate nothing ; `LZ4_createStreamHC()`, `LZ4_compress_HC()` and lz4frame employ it (+64 KB per state) : lz4frame worker threads no longer allocate memory
-cli  : decodes Firefox's mozlz4 files (`.jsonlz4`, `.mozlz4`), proposed by @UnitedMarsupials
-cli  : decodes legacy frames ended by four zero bytes (Linux kernel end marker), requested by @benjarobin
-cli  : compressed output no longer depends on multithreading support (`lz4` and `lz4-nomt` produce the same frames, also with `-BD`)
-cli  : benchmark (`-b`) measures frames, compressed as `lz4` does with the same options (`-B#`, `-BD`, `-BX`, `-D`, `-T#`, etc.)
-cli  : new option `--single-thread` : frames compressed by the main thread alone, in liblz4's single-threaded mode (output can differ from `-T1` with `-BD`)
-cli  : custom block sizes (`-B#`, # >= 32) are honored, and compressed single-threaded
-cli  : `-T#` : nb of compression threads (the main thread reads and writes files), limited by file size and by a memory budget (`--memory=#`, `LZ4_MEMORY`), with a warning when it reduces `#`
-cli  : `-T#` capped by liblz4 (1024 threads, 128 on 32-bit systems), replacing build macro `LZ4_NBWORKERS_MAX` ; `-V` tells if compression is multithreaded
-cli  : output buffer no longer grows with the nb of threads : more threads within a memory budget (ex: 22 instead of 13 with `--memory=300M`)
-cli  : a source file modified, renamed or replaced during its compression is detected, and kept with `--rm` ; error 54 when the output can't be verified
-cli  : `lz4 -l` could hang on Windows with an empty input, as could decoding the resulting legacy stream
-cli  : `--rm` keeps the source file after a decompression failure, by @Furan666
-cli  : a new output file is only readable by its owner until the source's permissions are copied, once it is complete
-cli  : an output which is the input itself (same name, hard or symbolic link) is refused, instead of truncating the input before reading it
-cli  : `lz4 -t --rm` no longer removes the tested file, and `--rm` with `stdin` no longer fails nor removes a file named `stdin`, by @Nexory
-cli  : `lz4 -t -m` no longer writes decoded content to stdout, reported by @tansy
-cli  : `lz4 --list` rejects truncated frames, instead of reporting them as valid, by @jmestwa-coder
-cli  : `lz4 --list` no longer reads uninitialized bytes on truncated frame headers, now reported as not recognized, by @akashdeshmukh-git
-cli  : numeric arguments that overflow are rejected, instead of silently wrapping around, by @akashdeshmukh-git
-cli  : `-b --fast=#` benchmarks a single level, instead of all levels up to -10000 when # > 10000
-cli  : legacy format (`-l`) : `--fast=#` selects the same acceleration as the frame format (`--fast=1` was the same as `-1`)
-cli  : legacy format (`-l`) : honors `--rm`, and keeps the source file's owner, permissions and modification time
-cli  : legacy format (`-l`) : `-2` compresses with HC, as the frame format does (it was the same as `-1`), by @Nexory
-cli  : `-m` : a missing input file no longer distorts the final speed summary of compression
-cli  : warning when `--content-size` is used with `stdin`, by @jlee303
-cli  : fix benchmark cpu time on Windows with very large files
-cli  : `-b` crashed with small block sizes (`-B#`) on large inputs (since v1.7.3)
-cli  : `-b -d` could crash with multiple large files, or a frame decoding to more than 2 GB (since v1.9.4), reported by @arshsmith1
-cli  : multithreaded decompression could write out of bounds after 2^31 frames (since v1.10.0), by @arshsmith1
-build: x86 builds keep branches within 32-byte boundaries (JCC erratum) : faster on Intel cpus of the Skylake family (up to +12% compression, +31% decompression), unchanged on others
-build: refactored `make` build, parallel by default
-build: `make all install` could fail to link, or install incomplete files, by @hotschmoe
-build: cmake : `lz4` supports multithreading on pthread platforms
+fix  : data corruption in valid usage : ring buffer decoding (`LZ4_decoderRingBufferSize()`, since v1.9.0), rare cases of streaming or `destSize` compression, one reported by @freedom-winds
+fix  : single-thread `lz4` could truncate the decoding of concatenated frames with block checksums
+fix  : multithreaded decompression could write out of bounds after 2^31 frames (since v1.10.0), by @arshsmith1
+fix  : `LZ4F_compressBegin_usingDict()` ignored the dictionary with independent blocks
+fix  : some periodic data compressed up to 30x worse at fast levels, and very slowly at level 12, reported by @martinus
+fix  : invalid arguments (negative sizes, `NULL`, invalid `blockSizeID`, extreme levels) no longer crash nor overflow, by @arthuz-th, @jaypatrickhoward, @louislafosse, @akashdeshmukh-git, @rinsuki
+fix  : lz4file reports truncated files and write failures, and accepts files < 19 bytes, by @axiqia
+perf : faster decompression on aarch64 and x86-64 (up to +19%, +4% on silesia.tar), `LZ4_FAST_DEC_LOOP` on aarch64 with clang and on riscv64, by @Nicoshev and @arpadpanyik-arm
+perf : faster compression of small blocks at fast levels, with reused states (up to +80%) or dictionaries (up to +35%), partly proposed by @BiplabRaut
+perf : faster levels 11 and 12 (+8% to +27%), level 2 compresses ~0.8% better
+perf : x86 builds avoid the JCC erratum : up to +12% compression and +31% decompression on Intel Skylake-family cpus
+api  : multithreaded lz4frame compression (experimental `LZ4F_preferences_t.nbWorkers`) : output independent of the nb of workers and of the context's history
+api  : random access within frames and lz4 files : `LZ4F_resumeFrame()`, `LZ4F_seek()`, `LZ4F_tell()` (static)
+api  : `LZ4_decompress_safe()` returns distinct error codes : `-1` malformed input, `-2` `dstCapacity` too small, `-3` missing dictionary
+api  : lz4frame compression accepts any `dstCapacity`, and only fails if the output doesn't fit
+api  : removed from headers : functions deprecated since v1.7.x / v1.8.0 (still exported by liblz4), unprefixed lz4frame enums ; `LZ4_resetStream()` and `LZ4_resetStreamHC()` are deprecated
+api  : `LZ4F_compressOptions_t` must be zero-initialized ; reserved fields are scalars (flatten positional initializers) ; `LZ4F_uncompressedUpdate()` deprecated (use `.uncompressed`)
+api  : custom allocators for lz4file (`_advanced()` functions), `LZ4_USER_MEMORY_FUNCTIONS` also for lz4frame and lz4file ; `LZ4F_cctx_size()` and `LZ4F_dctx_size()` by @felixhandte
+api  : HC states include the buffer of levels 10+ (+64 KB per state) : no allocation during compression
+cli  : multithreaded compression relies on liblz4 : same output with any nb of threads and without multithreading support ; `-T#` within a memory budget (`--memory=#`) ; new `--single-thread`
+cli  : decodes Firefox's mozlz4 files, proposed by @UnitedMarsupials, and legacy frames with the Linux kernel end marker, requested by @benjarobin (frame format documentation by @Artoria2e5)
+cli  : safer file handling : an output identical to the input is refused, a source modified during compression is detected, `--rm` keeps the source after failures, by @Furan666 and @Nexory
+cli  : benchmark (`-b`) measures frames, compressed as `lz4` does with the same options
+cli  : various fixes (`--list`, legacy format, benchmark, `-t -m`, numeric arguments), by @tansy, @jmestwa-coder, @akashdeshmukh-git, @arshsmith1, @jlee303 and @Nexory
+build: dynamic library multithreaded by default, static library single-threaded ; cmake `lz4` multithreaded
 build: cmake : exported `lz4::lz4` target by @dg0yt, CMake 4 support by @GeorgH93, `CMAKE_POSITION_INDEPENDENT_CODE` by @ds-sloth
-build: cmake : as a subproject (`add_subdirectory()`), the `lz4` program is no longer built by default (`-DLZ4_BUILD_CLI=ON` restores it), by @crueter
-build: reproducible static library, by @rpurdie
-build: dynamic library multithreaded by default, static library single-threaded : `make lib-mt` / `lib-nomt`, cmake and meson options
-build: `make install` installs the libraries already built (ex: `make lib-mt && make install`)
-build: meson fixes, by @grobian, @bgilbert and @eli-schwartz
-build: AIX support, by @shubhamhii
-build: pkg-config `License` field, by @iwamatsu
-build: public headers compile with clang C++ modules (`-fmodules`), reported by @doraorak
-build: new build macro `LZ4_WILDCOPY64`, to tune decompression on targets like wasm, proposed by @JCash
-build: `xxhash.c` compiles without `-Wbad-function-cast` warnings, by @brainy
-build: Windows release package : standalone `lz4.exe` with README, NEWS and license texts ; its unusable development files are removed
-build: `LZ4_USER_MEMORY_FUNCTIONS` also applies to lz4frame (default allocator) and lz4file, which called `malloc()` and `free()`
+build: cmake : as a subproject, the `lz4` program is no longer built by default (`-DLZ4_BUILD_CLI=ON` restores it), by @crueter
+build: reproducible static library by @rpurdie, AIX support by @shubhamhii, meson fixes by @grobian, @bgilbert and @eli-schwartz, other fixes by @hotschmoe, @iwamatsu, @doraorak, @JCash and @brainy
 port : RISC-V with `Zicclsm` uses unaligned memory accesses, by @Polaris-911
-doc  : ring buffer conditions of `LZ4_decompress_safe_continue()`
-doc  : frame format : Linux kernel legacy last block, by @Artoria2e5
 
 v1.10.0
 cli  : multithreading compression support: improves speed by X times threads allocated
