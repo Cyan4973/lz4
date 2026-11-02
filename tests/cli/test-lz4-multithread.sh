@@ -56,6 +56,7 @@ lz4 -f --memory=abc $FPREFIX-src $FPREFIX.lz4 && exit 1  # must fail
 lz4 -f --memory=0 $FPREFIX-src $FPREFIX.lz4 && exit 1    # must fail
 lz4 -f --memory=18446744073709551616 $FPREFIX-src $FPREFIX.lz4 && exit 1  # must fail (overflow)
 lz4 -f --memory=17179869184G $FPREFIX-src $FPREFIX.lz4 && exit 1          # must fail (overflow)
+lz4 -f --memoryX 50M $FPREFIX-src $FPREFIX.lz4 && exit 1                 # must fail (unknown long command)
 lz4 -f -1 $FPREFIX-src $FPREFIX-ref.lz4
 MT=0; if lz4 -V 2>&1 | grep -q "multithread"; then MT=1; fi   # otherwise, -T# and memory budget are ignored
 # a requested nb of threads (-T#) reduced by the budget : warning (silenced by -q) ; automatic : only with -v

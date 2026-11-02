@@ -612,6 +612,7 @@ int main(int argCount, const char** argv)
                     continue;
                 }
                 if (longCommandWArg(&argument, "--memory")) {
+                    if (*argument != '=' && *argument != 0) badusage(exeName);  /* ex: --memoryX */
                     const char* sizeStr;
                     NEXT_FIELD(sizeStr);
                     if (readSizeFromCharChecked(&sizeStr, &memoryBudget))
