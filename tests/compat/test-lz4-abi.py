@@ -65,9 +65,16 @@ def git(args, pipe=True):
 
 def get_git_tags():
     # Only start from first v1.7.x format release
-    stdout, stderr = git(['tag', '-l', 'v[1-9].[0-9].[0-9]'])
+    stdout, stderr = git(['tag', '-l', 'v[1-9].[0-9]*.[0-9]*'])
     tags = stdout.decode('utf-8').split()
     return tags
+
+def version(tag):
+    return tuple(int(x) for x in tag[1:].split('.'))
+
+def exported_symbols(lib):
+    stdout, stderr = proc(['nm', '-D', '--defined-only', lib])
+    return set(line.split()[-1] for line in stdout.decode('utf-8').splitlines() if line.strip())
 
 # https://stackoverflow.com/a/19711609/2132223
 def sha1_of_file(filepath):
@@ -94,7 +101,7 @@ if __name__ == '__main__':
     print('Retrieve release tags >= v1.7.5 :')
     os.chdir(clone_dir)
     tags = [head] + get_git_tags()
-    tags = [x for x in tags if (x >= 'v1.7.5')]
+    tags = [x for x in tags if version(x) >= (1, 7, 5)]
     print(tags)
 
     # loop across architectures
@@ -125,6 +132,19 @@ if __name__ == '__main__':
             build_env = os.environ.copy()
             build_env["CFLAGS"] = "-O1 " + march
             make(['liblz4'], env=build_env)
+
+        print(' ')
+        print('******************************')
+        print('Current Dynamic Library exports all symbols of the latest release')
+        print('******************************')
+        # against the latest release : older ones also exported internal or experimental symbols, hidden since v1.8.0 and v1.9.0
+        latest = max((x for x in tags if x != head), key=version)
+        head_symbols = exported_symbols(lib_dir + '/liblz4.so')
+        missing = exported_symbols('{}/{}/lib/liblz4.so'.format(tmp_dir, latest)) - head_symbols
+        if missing:
+            print('Error : symbols exported by {} are missing : {}'.format(latest, ' '.join(sorted(missing))))
+            sys.exit(1)
+        print('{} : ok'.format(latest))
 
         print(' ')
         print('******************************')
