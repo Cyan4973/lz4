@@ -656,6 +656,9 @@ int LZ4_compress_destSize_extState(void* state, const char* src, char* dst, int*
  * Otherwise, it means compression actually expanded data,
  * and it would be more efficient to store such data with a flag indicating it's not compressed.
  * This can happen when data is not compressible (already compressed, or encrypted).
+ * Note that decompressedSize must be <= LZ4_MAX_INPUT_SIZE :
+ * if the size is incorrect (too large or negative),
+ * LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE() returns 0, like LZ4_COMPRESSBOUND().
  *
  * For in-place compression, margin is larger, as it must be able to cope with both
  * history preservation, requiring input data to remain unmodified up to LZ4_DISTANCE_MAX,
@@ -685,7 +688,7 @@ int LZ4_compress_destSize_extState(void* state, const char* src, char* dst, int*
  */
 
 #define LZ4_DECOMPRESS_INPLACE_MARGIN(compressedSize)          (((compressedSize) >> 8) + 32)
-#define LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(decompressedSize)   ((decompressedSize) + LZ4_DECOMPRESS_INPLACE_MARGIN(decompressedSize))  /**< note: presumes that compressedSize < decompressedSize. note2: margin is overestimated a bit, since it could use compressedSize instead */
+#define LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(decompressedSize)   ((unsigned)(decompressedSize) > (unsigned)LZ4_MAX_INPUT_SIZE ? 0 : (decompressedSize) + LZ4_DECOMPRESS_INPLACE_MARGIN(decompressedSize))  /**< note: presumes that compressedSize < decompressedSize. note2: the margin is derived from decompressedSize, as a worst case for compressedSize (it is slightly overestimated this way, which is always safe). note3: returns 0 if decompressedSize is incorrect (too large or negative), like LZ4_COMPRESSBOUND(). */
 
 #ifndef LZ4_DISTANCE_MAX   /* history window size; can be user-defined at compile time */
 #  define LZ4_DISTANCE_MAX 65535   /* set to maximum value by default */

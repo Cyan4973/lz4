@@ -992,6 +992,49 @@ TEST(decompress_safe_inPlace_limitCase)
     ASSERT_MEMEQ(buffer, src, (size_t)srcSize);
 }
 
+/* LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE() reference value,
+ * computed in long double (exact for these magnitudes),
+ * never as a 32-bit or 64-bit integer expression */
+static long double refInPlaceBufferSize(long long decompressedSize)
+{
+    long double const d = (long double)decompressedSize;
+    return d + (long double)(decompressedSize / 256) + 32;
+}
+
+TEST(decompress_inPlace_bufferSize_macro)
+{
+    /* the macro must remain usable at compile time, for static and stack allocations */
+    enum { staticCheck = (LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(1000) == 1035) ? 1 : -1 };
+    static const unsigned legalU[] = { 0, 1, 1000, 65 KB, 1 MB, LZ4_MAX_INPUT_SIZE };
+    static const int legalI[] = { 0, 1, 1000, 65 KB, 1 MB, (int)LZ4_MAX_INPUT_SIZE };
+    unsigned const maxD = LZ4_MAX_INPUT_SIZE;
+    int const i32Size = 2140000000;         /* fits int : wraps the unguarded macro to a negative value */
+    unsigned const u32Size = 4290000000U;   /* fits unsigned : wraps the unguarded macro to a small positive value */
+    size_t n;
+
+    /* correct inputs (<= LZ4_MAX_INPUT_SIZE) : exact values, whatever the type of the argument */
+    ASSERT_EQ(staticCheck, 1);
+    for (n = 0; n < ARRAY_SIZE(legalU); n++) {
+        ASSERT_EQ((long long)LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(legalU[n]), (long long)refInPlaceBufferSize(legalU[n]));
+    }
+    for (n = 0; n < ARRAY_SIZE(legalI); n++) {
+        ASSERT_EQ((long long)LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(legalI[n]), (long long)refInPlaceBufferSize(legalI[n]));
+    }
+    ASSERT_EQ((long long)LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(maxD), (long long)refInPlaceBufferSize(maxD));
+
+    /* incorrect inputs (too large or negative) : reported as 0,
+     * the same convention as LZ4_COMPRESSBOUND() */
+    ASSERT_EQ(LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(u32Size), 0);      /* unguarded : 11,790,548 */
+    ASSERT_EQ(LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(i32Size), 0);      /* unguarded : -2,146,607,889 */
+    ASSERT_EQ(LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(4294967295U), 0);
+    ASSERT_EQ(LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(2139129089), 0);
+    ASSERT_EQ(LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(-1), 0);
+    ASSERT_EQ(LZ4_DECOMPRESS_INPLACE_BUFFER_SIZE(maxD + 1), 0);     /* boundary : maxD itself is accepted (above) */
+    ASSERT_EQ(LZ4_COMPRESSBOUND(u32Size), 0);
+    ASSERT_EQ(LZ4_COMPRESSBOUND(i32Size), 0);
+    ASSERT_EQ(LZ4_COMPRESSBOUND(-1), 0);
+}
+
 
 /*-************************************
 *  Ring buffers
