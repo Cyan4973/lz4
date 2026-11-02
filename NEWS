@@ -96,6 +96,7 @@ build: refactored `make` build, parallel by default
 build: `make all install` could fail to link, or install incomplete files, by @hotschmoe
 build: cmake : `lz4` supports multithreading on pthread platforms
 build: cmake : exported `lz4::lz4` target by @dg0yt, CMake 4 support by @GeorgH93, `CMAKE_POSITION_INDEPENDENT_CODE` by @ds-sloth
+build: cmake : as a subproject (`add_subdirectory()`), the `lz4` program is no longer built by default (`-DLZ4_BUILD_CLI=ON` restores it), by @crueter
 build: reproducible static library, by @rpurdie
 build: dynamic library multithreaded by default, static library single-threaded : `make lib-mt` / `lib-nomt`, cmake and meson options
 build: `make install` installs the libraries already built (ex: `make lib-mt && make install`)
