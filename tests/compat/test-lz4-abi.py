@@ -12,6 +12,7 @@ import glob
 import subprocess
 import filecmp
 import os
+import re
 import shutil
 import sys
 import hashlib
@@ -76,6 +77,14 @@ def exported_symbols(lib):
     stdout, stderr = proc(['nm', '-D', '--defined-only', lib])
     return set(line.split()[-1] for line in stdout.decode('utf-8').splitlines() if line.strip())
 
+# functions declared with LZ4LIB_API or LZ4FLIB_API in lib/ : the only symbols liblz4 may export
+def api_functions(lib_dir):
+    names = set()
+    for f in glob.glob(lib_dir + '/*.[ch]'):
+        with open(f, encoding='utf-8', errors='replace') as src:
+            names |= set(re.findall(r'\bLZ4F?LIB_API\b[^;{(]*?\b(LZ4\w*)\s*\(', src.read()))
+    return names
+
 # https://stackoverflow.com/a/19711609/2132223
 def sha1_of_file(filepath):
     with open(filepath, 'rb') as f:
@@ -135,7 +144,7 @@ if __name__ == '__main__':
 
         print(' ')
         print('******************************')
-        print('Current Dynamic Library exports all symbols of the latest release')
+        print('Current Dynamic Library exports the symbols of the latest release, and only its API')
         print('******************************')
         # against the latest release : older ones also exported internal or experimental symbols, hidden since v1.8.0 and v1.9.0
         latest = max((x for x in tags if x != head), key=version)
@@ -145,6 +154,12 @@ if __name__ == '__main__':
             print('Error : symbols exported by {} are missing : {}'.format(latest, ' '.join(sorted(missing))))
             sys.exit(1)
         print('{} : ok'.format(latest))
+        # and nothing else : internal functions stay hidden
+        extra = set(x for x in head_symbols if x.startswith('LZ4')) - api_functions(lib_dir)
+        if extra:
+            print('Error : exported symbols outside of the API : {}'.format(' '.join(sorted(extra))))
+            sys.exit(1)
+        print('no symbol outside of the API : ok')
 
         print(' ')
         print('******************************')
