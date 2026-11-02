@@ -14,16 +14,6 @@ cmake_minimum_required(VERSION 3.5...4.0.2)
 
 set(LZ4_TOP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 
-# Determine if lz4 is built as a subproject (using add_subdirectory) or if it
-# is the master project.
-if (NOT DEFINED LZ4_MASTER_PROJECT)
-    set(LZ4_MASTER_PROJECT OFF)
-    # Checking project name is more reliable than checking source directories.
-    if (NOT DEFINED PROJECT_NAME)
-        set(LZ4_MASTER_PROJECT ON)
-    endif(NOT DEFINED PROJECT_NAME)
-endif(NOT DEFINED LZ4_MASTER_PROJECT)
-
 #-----------------------------------------------------------------------------
 # VERSION EXTRACTION - Parse version information from header file
 #-----------------------------------------------------------------------------
@@ -59,17 +49,9 @@ endif()
 #-----------------------------------------------------------------------------
 # BUILD OPTIONS - Configure build targets and features
 #-----------------------------------------------------------------------------
-option(LZ4_BUILD_CLI "Build lz4 program" ${LZ4_MASTER_PROJECT})
-option(LZ4_BUILD_LEGACY_LZ4C "Build lz4c program with legacy argument support" OFF)
-option(LZ4_BUILD_MULTITHREAD "Enable multithreading in lz4 programs" ON)
-# By default, the shared library supports multithreaded compression (see LZ4F_preferences_t.nbWorkers),
-# while the static library doesn't, so that programs linking it don't need to link threads.
-option(LZ4_SHARED_MULTITHREAD "Enable multithreading support in shared library" ON)
-option(LZ4_STATIC_MULTITHREAD "Enable multithreading support in static library (programs linking it must then link threads)" OFF)
-
-
 # Determine if LZ4 is being built as part of another project.
-# If LZ4 is bundled in another project, we don't want to install anything.
+# If LZ4 is bundled in another project, we don't want to install anything,
+# nor build the lz4 program by default.
 # Default behavior can be overridden by setting the LZ4_BUNDLED_MODE variable.
 if(NOT DEFINED LZ4_BUNDLED_MODE)
   get_directory_property(LZ4_IS_SUBPROJECT PARENT_DIRECTORY)
@@ -80,6 +62,20 @@ if(NOT DEFINED LZ4_BUNDLED_MODE)
   endif()
 endif()
 mark_as_advanced(LZ4_BUNDLED_MODE)
+
+if(LZ4_BUNDLED_MODE)
+  set(LZ4_BUILD_CLI_DEFAULT OFF)
+else()
+  set(LZ4_BUILD_CLI_DEFAULT ON)
+endif()
+option(LZ4_BUILD_CLI "Build lz4 program" ${LZ4_BUILD_CLI_DEFAULT})
+option(LZ4_BUILD_LEGACY_LZ4C "Build lz4c program with legacy argument support" OFF)
+option(LZ4_BUILD_MULTITHREAD "Enable multithreading in lz4 programs" ON)
+# By default, the shared library supports multithreaded compression (see LZ4F_preferences_t.nbWorkers),
+# while the static library doesn't, so that programs linking it don't need to link threads.
+option(LZ4_SHARED_MULTITHREAD "Enable multithreading support in shared library" ON)
+option(LZ4_STATIC_MULTITHREAD "Enable multithreading support in static library (programs linking it must then link threads)" OFF)
+
 
 #-----------------------------------------------------------------------------
 # PACKAGING - CPack configuration
