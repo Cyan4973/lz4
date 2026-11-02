@@ -49,17 +49,9 @@ endif()
 #-----------------------------------------------------------------------------
 # BUILD OPTIONS - Configure build targets and features
 #-----------------------------------------------------------------------------
-option(LZ4_BUILD_CLI "Build lz4 program" ON)
-option(LZ4_BUILD_LEGACY_LZ4C "Build lz4c program with legacy argument support" OFF)
-option(LZ4_BUILD_MULTITHREAD "Enable multithreading in lz4 programs" ON)
-# By default, the shared library supports multithreaded compression (see LZ4F_preferences_t.nbWorkers),
-# while the static library doesn't, so that programs linking it don't need to link threads.
-option(LZ4_SHARED_MULTITHREAD "Enable multithreading support in shared library" ON)
-option(LZ4_STATIC_MULTITHREAD "Enable multithreading support in static library (programs linking it must then link threads)" OFF)
-
-
 # Determine if LZ4 is being built as part of another project.
-# If LZ4 is bundled in another project, we don't want to install anything.
+# If LZ4 is bundled in another project, we don't want to install anything,
+# nor build the lz4 program by default.
 # Default behavior can be overridden by setting the LZ4_BUNDLED_MODE variable.
 if(NOT DEFINED LZ4_BUNDLED_MODE)
   get_directory_property(LZ4_IS_SUBPROJECT PARENT_DIRECTORY)
@@ -70,6 +62,20 @@ if(NOT DEFINED LZ4_BUNDLED_MODE)
   endif()
 endif()
 mark_as_advanced(LZ4_BUNDLED_MODE)
+
+if(LZ4_BUNDLED_MODE)
+  set(LZ4_BUILD_CLI_DEFAULT OFF)
+else()
+  set(LZ4_BUILD_CLI_DEFAULT ON)
+endif()
+option(LZ4_BUILD_CLI "Build lz4 program" ${LZ4_BUILD_CLI_DEFAULT})
+option(LZ4_BUILD_LEGACY_LZ4C "Build lz4c program with legacy argument support" OFF)
+option(LZ4_BUILD_MULTITHREAD "Enable multithreading in lz4 programs" ON)
+# By default, the shared library supports multithreaded compression (see LZ4F_preferences_t.nbWorkers),
+# while the static library doesn't, so that programs linking it don't need to link threads.
+option(LZ4_SHARED_MULTITHREAD "Enable multithreading support in shared library" ON)
+option(LZ4_STATIC_MULTITHREAD "Enable multithreading support in static library (programs linking it must then link threads)" OFF)
+
 
 #-----------------------------------------------------------------------------
 # PACKAGING - CPack configuration
