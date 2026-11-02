@@ -77,6 +77,8 @@ EXT        = .exe
 WINDRES ?= windres
 LDFLAGS += -Wl,--force-exe-suffix
 endif
+# executable suffix of multiconf.make, which detects only native Windows itself
+EXE = $(EXT)
 
 LIBLZ4      = $(LIBLZ4_NAME).$(SHARED_EXT_VER)
 
