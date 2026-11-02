@@ -623,6 +623,35 @@ TEST(attach_dictionary_smallBlocks)
     }
 }
 
+/* a small block (< LZ4_HASHTABLESIZE / 16) reuses the table of a used state : the output must not depend on it
+ * (ex: lz4frame : a frame must not depend on previous frames, nor on which worker compressed previous blocks).
+ * After a match, the position following the previous occurrence of ip-1 is tested first :
+ * an empty slot of a cleared table (0) must not be taken for an occurrence at position 0. */
+TEST(compress_fast_extState_fastReset_usedState)
+{
+    int const srcSize = 256;
+    char* const src = (char*)UT_fixedNoise((size_t)srcSize);
+    const char* const p = src + 1;     /* 16 bytes, after an occurrence of ip-1 never seen */
+    const char* const m = src + 80;    /* 12 bytes, matched at 150 */
+    int const capacity = LZ4_COMPRESSBOUND(srcSize);
+    char* const ref = (char*)UT_malloc((size_t)capacity);
+    char* const dst = (char*)UT_malloc((size_t)capacity);
+    LZ4_stream_t* const state = newStream();
+    int refSize;
+    memcpy(src + 40, p, 4);            /* short occurrence of p : the table's candidate for p */
+    src[44] = (char)(p[4] ^ 1);
+    src[92] = (char)(p[0] ^ 1);        /* the match ends right before p */
+    memcpy(src + 150, m, 12);
+    src[149] = (char)(src[79] ^ 1);
+    memcpy(src + 162, p, 16);
+    src[0] = (char)(m[11] ^ 1);        /* (ip-1) at 161 : not an occurrence of position 0 */
+
+    refSize = LZ4_compress_fast_extState_fastReset(state, src, ref, srcSize, capacity, 1);   /* new state */
+    ASSERT(refSize > 0);
+    ASSERT_EQ(LZ4_compress_fast_extState_fastReset(state, src, dst, srcSize, capacity, 1), refSize);   /* used state */
+    ASSERT_MEMEQ(dst, ref, (size_t)refSize);
+}
+
 TEST(resetStream_fast_largeFirstBlock)   /* a large first block gives the same output as a new stream */
 {
     const char* const block = clearedTableBlock();

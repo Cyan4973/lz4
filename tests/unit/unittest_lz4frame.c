@@ -421,8 +421,8 @@ TEST(compressFrame_exactCapacity)
     const void* const src = UT_sample(srcSize);
     size_t const capacity = LZ4F_compressFrameBound(srcSize, NULL);
     char* const frame = (char*)UT_malloc(capacity);
-    size_t const frameSize = LZ4F_OK(LZ4F_compressFrame(frame, capacity, src, srcSize, NULL));
-    LZ4F_cctx* const cctx = newCctx();   /* new, as the reference : a used context may produce a slightly different frame */
+    LZ4F_cctx* const cctx = newCctx();
+    size_t const frameSize = LZ4F_OK(LZ4F_compressFrame_usingCDict(cctx, frame, capacity, src, srcSize, NULL, NULL));
     ASSERT_EQ(LZ4F_OK(LZ4F_compressFrame_usingCDict(cctx, frame, frameSize, src, srcSize, NULL, NULL)), frameSize);
     ASSERT_LZ4F_ERROR(LZ4F_compressUpdate(cctx, frame, capacity, src, srcSize, NULL), LZ4F_ERROR_compressionState_uninitialized);
 }
@@ -2477,24 +2477,19 @@ TEST(compressBegin_smallDst)
 
 typedef struct {
     int usingCDict;             /* 0 => LZ4F_compressFrame() */
+    LZ4F_cctx* cctx;            /* used by LZ4F_compressFrame_usingCDict() */
     const LZ4F_CDict* cdict;
     const LZ4F_preferences_t* prefs;
     const BYTE* src;
     size_t srcSize;
 } sd_frameJob;
 
-/* each frame is compressed by a new context : a used one may produce a slightly different frame,
- * as blocks < LZ4_HASHTABLESIZE / 16 reuse its hash table (64 KB with LZ4_MEMORY_USAGE=20) */
 static size_t sd_compressFrame(const sd_frameJob* job, void* dst, size_t dstCapacity)
 {
-    LZ4F_cctx* cctx;
-    size_t r;
     if (!job->usingCDict)
         return LZ4F_compressFrame(dst, dstCapacity, job->src, job->srcSize, job->prefs);
-    cctx = newCctx();
-    r = LZ4F_compressFrame_usingCDict(cctx, dst, dstCapacity, job->src, job->srcSize, job->cdict, job->prefs);
-    UT_release(cctx);
-    return r;
+    return LZ4F_compressFrame_usingCDict(job->cctx, dst, dstCapacity,
+                                         job->src, job->srcSize, job->cdict, job->prefs);
 }
 
 /* @return 1 if compression into @capacity behaves as expected, 0 otherwise */
@@ -2590,6 +2585,7 @@ TEST(compressFrame_smallDst)
         prefs.favorDecSpeed = (flags >> 4) & 1;
         prefs.compressionLevel = levels[lv];
         job.usingCDict = (api != 0);
+        job.cctx = cctx;
         job.cdict = (api == 2) ? cdict : NULL;
         job.prefs = &prefs;
         job.src = src + inputs[in].pos;

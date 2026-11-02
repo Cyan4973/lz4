@@ -1351,7 +1351,10 @@ _resume:
                 /* no occurrence in the current context : try the dictionary */
                 prevIndex = LZ4_getIndexOnHash(hPrev, dictCtx->hashTable, byU32) + dictDelta;
             }
-            {   U32 const ctxIndex = prevIndex + 1;
+            {   /* used table (small block, see LZ4_prepareTable()) : a stale entry yields the candidate of an empty slot
+                 * of a cleared table (0), the position after the first one : the output doesn't depend on the table's history */
+                int const usedTable = (dictDirective == noDict) && (dictIssue == dictSmall);
+                U32 const ctxIndex = ((usedTable && (prevIndex < startIndex)) ? startIndex : prevIndex) + 1;
                 int const inDict = (dictDirective == usingExtDict || dictDirective == usingDictCtx) && (ctxIndex < startIndex);
                 if ( ((dictIssue==dictSmall) ? (ctxIndex >= prefixIdxLimit) : 1)
                   && (((tableType==byU16) && (LZ4_DISTANCE_MAX == LZ4_DISTANCE_ABSOLUTE_MAX)) ? 1 : (ctxIndex+LZ4_DISTANCE_MAX >= current))
