@@ -415,14 +415,15 @@ static int readSizeFromCharChecked(const char** stringPtr, U64* value)
 }
 
 /** longCommandWArg() :
- *  check if *stringPtr is the same as longCommand.
+ *  check if *stringPtr is longCommand, alone or followed by '=' (ex: --memory, --memory=10M).
  *  If yes, @return 1 and advances *stringPtr to the position which immediately follows longCommand.
- * @return 0 and doesn't modify *stringPtr otherwise.
+ * @return 0 and doesn't modify *stringPtr otherwise (ex: --memoryX).
  */
 static int longCommandWArg(const char** stringPtr, const char* longCommand)
 {
     size_t const comSize = strlen(longCommand);
-    int const result = !strncmp(*stringPtr, longCommand, comSize);
+    int const result = !strncmp(*stringPtr, longCommand, comSize)
+                    && ((*stringPtr)[comSize] == '=' || (*stringPtr)[comSize] == 0);
     if (result) *stringPtr += comSize;
     return result;
 }
@@ -601,7 +602,6 @@ int main(int argCount, const char** argv)
                 if (!strcmp(argument,  "--rm")) { LZ4IO_setRemoveSrcFile(prefs, 1); continue; }
 
                 if (longCommandWArg(&argument, "--threads")) {
-                    if (*argument != '=' && *argument != 0) badusage(exeName);  /* ex: --threadsX */
                     NEXT_UINT32(nbWorkers);
                     nbWorkersRequested = 1;
                     singleThread = 0;
@@ -631,9 +631,6 @@ int main(int argCount, const char** argv)
                         } else {
                             badusage(exeName);
                         }
-                    } else if (*argument != 0) {
-                        /* Invalid character following --fast */
-                        badusage(exeName);
                     } else {
                         cLevel = -1;  /* default for --fast */
                     }
