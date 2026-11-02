@@ -34,4 +34,8 @@ Pull requests target the `dev` branch.
 - CI builds with `-Werror` (C90 to C11, C++, 32-bit), and runs tests under sanitizers.
 - Speed matters : changes to compression or decompression code must be measured
   (`lz4 -b`, `tests/fullbench`), not estimated.
-- User-visible changes (fixes, API, command line, performance) get a line in `NEWS`, in the same pull request.
+- `NEWS` lists significant user-visible changes, not every change : data corruption or memory safety
+  in valid usage, major features, API or behavior changes users must act on, large speed or ratio changes.
+  Such a change gets its line in the same pull request : short, in the style of previous versions.
+  Minor fixes (edge cases, invalid arguments, small speed changes) extend an existing grouped line, or get none.
+  Bugs never released get none.
