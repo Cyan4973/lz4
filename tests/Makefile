@@ -315,6 +315,10 @@ test-lz4-testmode: lz4 datagen
 	@echo "\n ---- bench mode ----"
 	./cli/test-lz4-testmode.sh
 
+test-lz4-rm: lz4 datagen
+	@echo "\n ---- test --rm : source removed only once its output is complete ----"
+	./cli/test-lz4-rm.sh
+
 test-lz4-opt-parser: lz4 datagen
 	@echo "\n ---- test opt-parser ----"
 	./cli/test-lz4-opt-parser.sh
@@ -322,7 +326,7 @@ test-lz4-opt-parser: lz4 datagen
 test-lz4-essentials : lz4 datagen test-datagen-invalid-input test-lz4-basic test-lz4-multiple \
                       test-lz4-multiple-legacy test-lz4-frame-concatenation \
                       test-lz4-testmode test-lz4-contentSize test-lz4-dict \
-                      test-lz4-blocksize test-lz4-mozlz4 test-lz4-multithread
+                      test-lz4-blocksize test-lz4-mozlz4 test-lz4-multithread test-lz4-rm
 
 test-lz4: lz4 datagen test-lz4-essentials test-lz4-opt-parser \
           test-lz4-sparse test-lz4-hugefile test-lz4-dict \

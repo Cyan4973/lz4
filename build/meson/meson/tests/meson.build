@@ -143,6 +143,9 @@ test_scripts = {
   'lz4-opt-parser': {
     'depends': [lz4, targets['datagen']],
   },
+  'lz4-rm': {
+    'depends': [lz4, targets['datagen']],
+  },
   'lz4-skippable': {
     'depends': [lz4],
   },
