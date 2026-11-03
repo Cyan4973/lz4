@@ -188,7 +188,7 @@ typedef struct {
 /* nbWorkers : experimental
  *  0 (default) : single-threaded, unchanged behavior.
  *  >= 1 : input is cut into jobs, compressed by nbWorkers worker threads (capped at 1024, 128 on 32-bit systems),
- *         while the calling thread fills and emits them (at flush points, it also compresses the last job).
+ *         while the calling thread fills and emits them (it compresses a flushed job itself when no other job is running).
  *  - Output only depends on content, parameters and flush points :
  *    never on nbWorkers value (>= 1), scheduling, input slicing, nor stableSrc.
  *  - With independent blocks, output is identical to nbWorkers == 0.
