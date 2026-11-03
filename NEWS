@@ -20,7 +20,7 @@ api  : custom allocators for lz4file (`_advanced()` functions), `LZ4_USER_MEMORY
 api  : HC states include the buffer of levels 10+ (+64 KB per state) : no allocation during compression
 cli  : multithreaded compression relies on liblz4 : same output with any nb of threads and without multithreading support ; `-T#` within a memory budget (`--memory=#`) ; new `--single-thread`
 cli  : decodes Firefox's mozlz4 files, proposed by @UnitedMarsupials, and legacy frames with the Linux kernel end marker, requested by @benjarobin (frame format documentation by @Artoria2e5)
-cli  : safer file handling : an output identical to the input is refused, a source modified during compression is detected, `--rm` keeps the source after failures, by @Furan666 and @Nexory
+cli  : safer file handling : an output identical to the input is refused, a source modified during compression is detected, `--rm` keeps the source after failures, by @Furan666, @Nexory and @immanuwell
 cli  : benchmark (`-b`) measures frames, compressed as `lz4` does with the same options
 cli  : various fixes (`--list`, legacy format, benchmark, `-t -m`, numeric arguments), by @tansy, @jmestwa-coder, @akashdeshmukh-git, @arshsmith1, @jlee303 and @Nexory
 build: dynamic library multithreaded by default, static library single-threaded ; cmake `lz4` multithreaded

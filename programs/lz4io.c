@@ -957,7 +957,12 @@ LZ4IO_finishCompressedFile(FILE* srcFile, FILE* dstFile,
                            const LZ4IO_prefs_t* io_prefs)
 {
     fclose(srcFile);
-    if (!LZ4IO_isStdout(dstFileName)) fclose(dstFile);  /* do not close stdout */
+    /* write errors may only be reported when buffered output is flushed */
+    if (LZ4IO_isStdout(dstFileName)) {
+        if (fflush(dstFile) != 0) END_PROCESS(49, "Write error : cannot write %s", dstFileName);
+    } else {
+        if (fclose(dstFile) != 0) END_PROCESS(49, "Write error : cannot write %s", dstFileName);
+    }
 
     /* Copy owner, file permissions and modification time */
     {   stat_t statbuf;
@@ -2761,10 +2766,6 @@ LZ4IO_decompressSrcFile(unsigned long long* outGenSize,
 
     /* Close input */
     fclose(finput);
-    if (!result && LZ4IO_mustRemoveSrcFile(prefs, input_filename)) {  /* --rm */
-        if (remove(input_filename))
-            END_PROCESS(45, "Remove error : %s: %s", input_filename, strerror(errno));
-    }
 
     /* Final Status */
     DISPLAYLEVEL(2, "\r%79s\r", "");
@@ -2775,6 +2776,14 @@ LZ4IO_decompressSrcFile(unsigned long long* outGenSize,
     return result;
 }
 
+
+/* --rm : the source is removed once its decoded content is written,
+ * which write errors may only report when the output is closed, or flushed when shared (stdout) */
+static void LZ4IO_removeDecodedSrcFile(const LZ4IO_prefs_t* prefs, const char* input_filename)
+{
+    if (LZ4IO_mustRemoveSrcFile(prefs, input_filename) && remove(input_filename))
+        END_PROCESS(45, "Remove error : %s: %s", input_filename, strerror(errno));
+}
 
 static int
 LZ4IO_decompressDstFile(unsigned long long* outGenSize,
@@ -2796,7 +2805,7 @@ LZ4IO_decompressDstFile(unsigned long long* outGenSize,
     ress.dstFile = foutput;
     result = LZ4IO_decompressSrcFile(outGenSize, ress, input_filename, output_filename, prefs);
 
-    fclose(foutput);
+    if (fclose(foutput) != 0 && !result) END_PROCESS(70, "Write error : cannot write %s", output_filename);
 
     /* Copy owner, file permissions and modification time */
     if ( stat_result != 0
@@ -2806,6 +2815,7 @@ LZ4IO_decompressDstFile(unsigned long long* outGenSize,
         /* should return value be read ? or is silent fail good enough ? */
     }
 
+    if (!result) LZ4IO_removeDecodedSrcFile(prefs, input_filename);
     return result;
 }
 
@@ -2859,7 +2869,12 @@ int LZ4IO_decompressMultipleFilenames(
         size_t const ifnSize = strlen(inFileNamesTable[i]);
         const char* const suffixPtr = inFileNamesTable[i] + ifnSize - suffixSize;
         if (LZ4IO_isStdout(suffix) || LZ4IO_isDevNull(suffix)) {
-            missingFiles += LZ4IO_decompressSrcFile(&processed, ress, inFileNamesTable[i], suffix, prefs);
+            int const result = LZ4IO_decompressSrcFile(&processed, ress, inFileNamesTable[i], suffix, prefs);
+            if (!result) {
+                if (fflush(ress.dstFile) != 0) END_PROCESS(70, "Write error : cannot write %s", suffix);
+                LZ4IO_removeDecodedSrcFile(prefs, inFileNamesTable[i]);
+            }
+            missingFiles += result;
             totalProcessed += processed;
             continue;
         }
@@ -2876,7 +2891,11 @@ int LZ4IO_decompressMultipleFilenames(
         totalProcessed += processed;
     }
 
-    if (ress.dstFile != NULL && ress.dstFile != stdout) fclose(ress.dstFile);
+    if (ress.dstFile != NULL) {
+        /* stdout : write errors may only be reported when buffered output is flushed */
+        if (fflush(ress.dstFile) != 0) END_PROCESS(70, "Write error : cannot write %s", suffix);
+        if (ress.dstFile != stdout && fclose(ress.dstFile) != 0) END_PROCESS(70, "Write error : cannot write %s", suffix);
+    }
     LZ4IO_freeDResources(ress);
     free(outFileName);
     LZ4IO_finalTimeDisplay(timeStart, cpuStart, totalProcessed);

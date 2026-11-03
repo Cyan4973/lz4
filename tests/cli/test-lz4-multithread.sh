@@ -116,6 +116,24 @@ if [ "$(uname)" = Linux ]; then   # write errors
     isErrorCode $rc
     rc=0; lz4 -f -l $FPREFIX-src /dev/full || rc=$?
     isErrorCode $rc
+    # write errors may only be reported when buffered output is flushed :
+    # --rm must not remove the source when the output could not be written
+    echo "small content" > $FPREFIX-small
+    lz4 -q -f $FPREFIX-small $FPREFIX-small.lz4
+    cp $FPREFIX-small.lz4 $FPREFIX-small-keep.lz4
+    rc=0; lz4 -q --rm -d -f --no-sparse $FPREFIX-small-keep.lz4 /dev/full || rc=$?
+    isErrorCode $rc
+    test -f $FPREFIX-small-keep.lz4
+    cp $FPREFIX-small $FPREFIX-small-keep
+    rc=0; lz4 -q --rm -f $FPREFIX-small-keep /dev/full || rc=$?
+    isErrorCode $rc
+    test -f $FPREFIX-small-keep
+    rc=0; lz4 -q --rm -c $FPREFIX-small-keep > /dev/full || rc=$?   # shared output (stdout)
+    isErrorCode $rc
+    test -f $FPREFIX-small-keep
+    rc=0; lz4 -q --rm -d -c $FPREFIX-small-keep.lz4 > /dev/full || rc=$?
+    isErrorCode $rc
+    test -f $FPREFIX-small-keep.lz4
 fi
 
 
