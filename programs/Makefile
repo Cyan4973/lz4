@@ -51,7 +51,8 @@ DEBUGFLAGS= -Wall -Wextra -Wundef -Wcast-qual -Wcast-align -Wshadow \
             -Wpointer-arith -Wstrict-aliasing=1
 USERCFLAGS:= -O3 $(CFLAGS) # -O3 can be overruled by user-provided -Ox level
 CFLAGS    = $(DEBUGFLAGS) $(JCC_FLAGS) $(USERCFLAGS)   # JCC_FLAGS : see build/make/lz4defs.make
-CPPFLAGS += -I$(LIBLZ4DIR) -DXXH_NAMESPACE=LZ4_
+# flags the build needs : see lib/Makefile
+MCM_CPPFLAGS += -I$(LIBLZ4DIR) -DXXH_NAMESPACE=LZ4_
 
 include ../build/make/lz4defs.make
 
@@ -60,7 +61,7 @@ ifeq ($(TARGET_OS)$(shell $(OS_VERSION)),SunOS5.10)
 LDFLAGS  += -lrt
 endif
 
-ALLFLAGS  = $(CFLAGS) $(CPPFLAGS) $(LDFLAGS)
+ALLFLAGS  = $(MCM_CFLAGS) $(CFLAGS) $(MCM_CPPFLAGS) $(CPPFLAGS) $(MCM_LDFLAGS) $(LDFLAGS)
 
 .PHONY:default
 default: lz4-release
@@ -122,14 +123,14 @@ lz4-exe.rc: lz4-exe.rc.in
 lz4-exe.o: lz4-exe.rc
 	$(WINDRES) -i lz4-exe.rc -o lz4-exe.o
 
-lz4: CPPFLAGS += $(THREAD_CPP)
-lz4: LDFLAGS += $(THREAD_LD)
+lz4: MCM_CPPFLAGS += $(THREAD_CPP)
+lz4: MCM_LDFLAGS += $(THREAD_LD)
 $(eval $(call c_program,lz4,$(LZ4_OBJS),lz4-exe.o,echo "$(THREAD_MSG)"))
 
 else # not WINBASED
 
-lz4: CPPFLAGS += $(THREAD_CPP)
-lz4: LDFLAGS += $(THREAD_LD)
+lz4: MCM_CPPFLAGS += $(THREAD_CPP)
+lz4: MCM_LDFLAGS += $(THREAD_LD)
 $(eval $(call c_program,lz4,$(LZ4_OBJS),,echo "$(THREAD_MSG)"))
 endif
 
@@ -144,7 +145,7 @@ $(eval $(call c_program,lz4-nomt,$(LZ4_OBJS)))
 CLEAN += lz4-wlib
 lz4-wlib: LIBFILES =
 lz4-wlib: SRCFILES+= $(LIBLZ4DIR)/xxhash.c  # benchmark unit needs XXH64()
-lz4-wlib: LDFLAGS += -L $(LIBLZ4DIR)
+lz4-wlib: MCM_LDFLAGS += -L $(LIBLZ4DIR)
 lz4-wlib: LDLIBS   = -llz4
 lz4-wlib: liblz4 $(OBJFILES)
 	@echo WARNING: $@ must link to an extended variant of the dynamic library which also exposes unstable symbols

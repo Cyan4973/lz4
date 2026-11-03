@@ -40,8 +40,9 @@ WFLAGS    = -Wall -Wextra -Wundef -Wcast-qual -Wcast-align -Wshadow \
             -Wswitch-enum -Wdeclaration-after-statement -Wstrict-prototypes \
             -Wpointer-arith -Wstrict-aliasing=1
 CFLAGS    = $(WFLAGS) $(DEBUGFLAGS) $(JCC_FLAGS) $(USERCFLAGS)   # JCC_FLAGS : see build/make/lz4defs.make
-CPPFLAGS += -I$(LIBDIR) -I$(PRGDIR) -Itools -DXXH_NAMESPACE=LZ4_
-ALLFLAGS  = $(CFLAGS) $(CPPFLAGS) $(LDFLAGS)
+# flags the build needs : see lib/Makefile
+MCM_CPPFLAGS += -I$(LIBDIR) -I$(PRGDIR) -Itools -DXXH_NAMESPACE=LZ4_
+ALLFLAGS  = $(MCM_CFLAGS) $(CFLAGS) $(MCM_CPPFLAGS) $(CPPFLAGS) $(MCM_LDFLAGS) $(LDFLAGS)
 
 include ../build/make/lz4defs.make
 
@@ -91,7 +92,7 @@ lz4c32:  # create a 32-bits version for 32/64 interop tests
 
 # *.o objects are from library
 %.o : $(LIBDIR)/%.c $(LIBDIR)/%.h
-	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
+	$(COMPILE.c) $< -o $@
 
 fullbench : DEBUGLEVEL=0
 fullbench : CPPFLAGS += -DNDEBUG
@@ -121,7 +122,7 @@ endif
 
 # test LZ4_USER_MEMORY_FUNCTIONS
 .PHONY: fullbench-wmalloc
-fullbench-wmalloc: CPPFLAGS += -DLZ4_USER_MEMORY_FUNCTIONS
+fullbench-wmalloc: MCM_CPPFLAGS += -DLZ4_USER_MEMORY_FUNCTIONS
 fullbench-wmalloc: fullbench
 
 fuzzer:
@@ -149,16 +150,16 @@ PTHREAD_LDFLAGS := $(if $(filter MINGW% Windows%,$(TARGET_OS)),,-pthread)
 # (c_program : objects are not shared, since frameMT employs different flags)
 FRAMEMT_OBJS := $(LIBDIR)/lz4frame.o $(LIB_OBJS) tools/datagen.o $(PRGDIR)/timefn.o fuzz/frameMT.o
 # LZ4F_NBWORKERS_MAX=128 (as on 32-bit systems) : keeps the capped test case (1000 workers) affordable
-frameMT: CPPFLAGS += -DLZ4F_MULTITHREAD=1 -DLZ4F_NBWORKERS_MAX=128u
-frameMT: LDFLAGS += $(PTHREAD_LDFLAGS)
+frameMT: MCM_CPPFLAGS += -DLZ4F_MULTITHREAD=1 -DLZ4F_NBWORKERS_MAX=128u
+frameMT: MCM_LDFLAGS += $(PTHREAD_LDFLAGS)
 $(eval $(call c_program,frameMT,$(FRAMEMT_OBJS)))
 
-frameMT-nomt: CPPFLAGS += -DLZ4F_NBWORKERS_MAX=128u
+frameMT-nomt: MCM_CPPFLAGS += -DLZ4F_NBWORKERS_MAX=128u
 $(eval $(call c_program,frameMT-nomt,$(FRAMEMT_OBJS)))
 
 # unit tests, with multi-threading support
-unittest-mt: CPPFLAGS += -DLZ4F_MULTITHREAD=1
-unittest-mt: LDFLAGS += $(PTHREAD_LDFLAGS)
+unittest-mt: MCM_CPPFLAGS += -DLZ4F_MULTITHREAD=1
+unittest-mt: MCM_LDFLAGS += $(PTHREAD_LDFLAGS)
 $(eval $(call c_program,unittest-mt,$(UNITTEST_OBJS)))
 
 .PHONY: clean

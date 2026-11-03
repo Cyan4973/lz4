@@ -29,7 +29,7 @@
 
 LIBDIR    := ../lib
 
-CPPFLAGS  += -I$(LIBDIR)
+MCM_CPPFLAGS += -I$(LIBDIR)   # flags the build needs : see lib/Makefile
 USERCFLAGS:= $(CFLAGS)
 WFLAGS     = -std=gnu99 -Wall -Wextra -Wundef -Wshadow -Wcast-align -Wstrict-prototypes -Wc++-compat
 CFLAGS     = $(WFLAGS) -O2 $(USERCFLAGS)

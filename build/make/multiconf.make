@@ -40,6 +40,9 @@
 # - MCM_EXTRA_OBJS: object files whose rule is written in the user Makefile
 # - HASH can be set to a different custom hash program.
 # - EXE: executable suffix, .exe by default on Windows, to set before the macro calls
+# - MCM_CPPFLAGS, MCM_CFLAGS, MCM_CXXFLAGS, MCM_LDFLAGS: flags the Makefile needs (include paths,
+#   -fPIC, soname...), globally or for a target (libfoo.so: MCM_CFLAGS += -fPIC). They stay when
+#   the user sets CPPFLAGS, CFLAGS, CXXFLAGS or LDFLAGS, e.g. on the command line.
 
 # *_program*: generates a recipe for a target that will be built in a cache directory.
 # The cache directory is automatically derived from MCM_CACHE_ROOT and the compilers and flags
@@ -99,6 +102,17 @@ DEPFLAGS = -MT $@ -MMD -MP -MF
 
 # --------------------------------------------------------------------------------------------
 
+# Flags the Makefile needs: MCM_CPPFLAGS, MCM_CFLAGS, MCM_CXXFLAGS and MCM_LDFLAGS. CPPFLAGS, CFLAGS,
+# CXXFLAGS and LDFLAGS are the user's: set on the command line, they replace the values of the
+# Makefile, those of targets too. Each command places the MCM_ variables right before them, so that
+# the user's flags come last (as in the GNU Coding Standards, and automake's AM_CFLAGS).
+# Make's built-in rules (prog: prog.c), and the recipes written with their variables ($(LINK.c)),
+# get them too: they are inserted in make's own definitions, not in those of the Makefile.
+mcm_add_flags = $(subst $$(CPPFLAGS),$$(MCM_CPPFLAGS) $$(CPPFLAGS),$(subst $$(CFLAGS),$$(MCM_CFLAGS) $$(CFLAGS),$(subst $$(CXXFLAGS),$$(MCM_CXXFLAGS) $$(CXXFLAGS),$(subst $$(LDFLAGS),$$(MCM_LDFLAGS) $$(LDFLAGS),$(value $(1))))))
+$(foreach v,$(filter COMPILE.% LINK.% LINT.% PREPROCESS.%,$(.VARIABLES)),$(if $(filter default,$(origin $(v))),$(eval $(v) = $(call mcm_add_flags,$(v)))))
+
+# --------------------------------------------------------------------------------------------
+
 # Automatic determination of build artifacts cache directory, keyed on build
 # flags, so that we can do incremental, parallel builds of different binaries
 # with different build flags without collisions.
@@ -114,7 +128,7 @@ mcm_quote = '$(subst ','\'',$(1))'
 
 # Flags that affect object files. Expanded in the context of each target,
 # so that target-level modifications are included.
-MCM_COMPILE_VARS := CC CXX CPPFLAGS CFLAGS CXXFLAGS
+MCM_COMPILE_VARS := CC CXX MCM_CPPFLAGS CPPFLAGS MCM_CFLAGS CFLAGS MCM_CXXFLAGS CXXFLAGS
 MCM_COMPILE_KEY = $(call mcm_key,$(MCM_COMPILE_VARS))
 
 # A cache outside the current directory can be shared with the Makefiles of other directories
@@ -224,7 +238,7 @@ $$(if $$(filter 2,$$(V)),$$(info $$(call $(0),$(1),$(2))))
 .PRECIOUS: $$(MCM_CACHE_ROOT)/%/$(call mcm_cache_name,$(1))
 $$(MCM_CACHE_ROOT)/%/$(call mcm_cache_name,$(1)) : $(1:.o=.S) $(2) | $$(MCM_CACHE_ROOT)/%/$(dir $(call mcm_cache_name,$(1)))/. $$$$(MCM_ODEPS_$(1))
 	@echo AS $$@
-	$$(CC) $$(CPPFLAGS) $$(CFLAGS) $$(DEPFLAGS) $$(MCM_CACHE_ROOT)/$$*/$(patsubst %.o,%.d,$(call mcm_cache_name,$(1))) -c $$< -o $$@
+	$$(CC) $$(MCM_CPPFLAGS) $$(CPPFLAGS) $$(MCM_CFLAGS) $$(CFLAGS) $$(DEPFLAGS) $$(MCM_CACHE_ROOT)/$$*/$(patsubst %.o,%.d,$(call mcm_cache_name,$(1))) -c $$< -o $$@
 
 endef # addTargetAsmObject
 
@@ -234,7 +248,7 @@ $$(if $$(filter 2,$$(V)),$$(info $$(call $(0),$(1),$(2)))) #debug print
 .PRECIOUS: $$(MCM_CACHE_ROOT)/%/$(call mcm_cache_name,$(1))
 $$(MCM_CACHE_ROOT)/%/$(call mcm_cache_name,$(1)) : $(1:.o=.c) $(2) | $$(MCM_CACHE_ROOT)/%/$(dir $(call mcm_cache_name,$(1)))/. $$$$(MCM_ODEPS_$(1))
 	@echo CC $$@
-	$$(CC) $$(CPPFLAGS) $$(CFLAGS) $$(DEPFLAGS) $$(MCM_CACHE_ROOT)/$$*/$(patsubst %.o,%.d,$(call mcm_cache_name,$(1))) -c $$< -o $$@
+	$$(CC) $$(MCM_CPPFLAGS) $$(CPPFLAGS) $$(MCM_CFLAGS) $$(CFLAGS) $$(DEPFLAGS) $$(MCM_CACHE_ROOT)/$$*/$(patsubst %.o,%.d,$(call mcm_cache_name,$(1))) -c $$< -o $$@
 
 endef # addTargetCObject
 
@@ -244,7 +258,7 @@ $$(if $$(filter 2,$$(V)),$$(info $$(call $(0),$(1),$(2),$(3))))
 .PRECIOUS: $$(MCM_CACHE_ROOT)/%/$(call mcm_cache_name,$(1))
 $$(MCM_CACHE_ROOT)/%/$(call mcm_cache_name,$(1)) : $(1:.o=.$(2)) $(3) | $$(MCM_CACHE_ROOT)/%/$(dir $(call mcm_cache_name,$(1)))/. $$$$(MCM_ODEPS_$(1))
 	@echo CXX $$@
-	$$(CXX) $$(CPPFLAGS) $$(CXXFLAGS) $$(DEPFLAGS) $$(MCM_CACHE_ROOT)/$$*/$(patsubst %.o,%.d,$(call mcm_cache_name,$(1))) -c $$< -o $$@
+	$$(CXX) $$(MCM_CPPFLAGS) $$(CPPFLAGS) $$(MCM_CXXFLAGS) $$(CXXFLAGS) $$(DEPFLAGS) $$(MCM_CACHE_ROOT)/$$*/$(patsubst %.o,%.d,$(call mcm_cache_name,$(1))) -c $$< -o $$@
 
 endef # addTargetCxxObject
 
@@ -355,7 +369,7 @@ endef # static_library
 
 
 # c_dynamic_library, cxx_dynamic_library - Create build rules for a dynamic/shared library with
-# caching, linked with $(CC) and $(CFLAGS), or with $(CXX) and $(CXXFLAGS) (C++ objects)
+# caching, linked with $(CC) and the C flags, or with $(CXX) and the C++ flags (C++ objects)
 # Parameters:
 #   1. libName      - Library name (becomes output file and phony target)
 #   2. objectDeps   - Object file dependencies (will be built in cache path)
@@ -364,8 +378,7 @@ endef # static_library
 #   4. postLinkCmds - Extra commands to run after linking
 #   5. extraHash    - Additional key to compute the unique cache path
 # Objects are compiled with the flags of the library: add -fPIC where the platform needs it,
-# e.g. libmath.so: override CFLAGS += -fPIC (override: also with make CFLAGS=...), and to
-# CXXFLAGS for C++ objects
+# e.g. libmath.so: MCM_CFLAGS += -fPIC, and to MCM_CXXFLAGS for C++ objects
 # Example:
 #   $(eval $(call c_dynamic_library,libmath.so,src/vector.o src/matrix.o,$(LIBZ_SO),strip $$@,$(VERSION)))
 define mcm_dynamic_library  # libName, objectDeps, extraDeps, postLinkCmds, extraHash, compiler, compilerFlags
@@ -378,12 +391,12 @@ MCM_OBJS_$(1) := $(2)
 MCM_XDEPS_$(1) := $(3)
 MCM_POST_$(1) := $(subst $$,$$$$,$(4))
 MCM_XHASH_$(1) := $(5)
-MCM_LINK_VARS_$(1) := LDFLAGS LDLIBS MCM_STRIP
+MCM_LINK_VARS_$(1) := MCM_LDFLAGS LDFLAGS LDLIBS MCM_STRIP
 
 .PRECIOUS: $$(MCM_CACHE_ROOT)/%/$(1)
 $$(MCM_CACHE_ROOT)/%/$(1) : $$$$(call mcm_link_objs,$$$$*,$(2)) $(3) | $$(MCM_CACHE_ROOT)/%/.
 	@echo LD $$@
-	$$($(6)) $$(CPPFLAGS) $$($(7)) $$(LDFLAGS) -shared -o $$@ $$(call mcm_link_list,$$(MCM_LINK_INPUTS)) $$(LDLIBS)
+	$$($(6)) $$(MCM_CPPFLAGS) $$(CPPFLAGS) $$(MCM_$(7)) $$($(7)) $$(MCM_LDFLAGS) $$(LDFLAGS) -shared -o $$@ $$(call mcm_link_list,$$(MCM_LINK_INPUTS)) $$(LDLIBS)
 	$$(if $$(filter 1,$$(MCM_STRIP)),-$$(STRIP) -S $$@)
 	$(4)
 
@@ -407,7 +420,7 @@ cxx_dynamic_library = $(call mcm_dynamic_library,$(1),$(2),$(3),$(4),$(5),CXX,CX
 #   5. extraHash     - Additional data to include in cache path hash
 # Parameters 6 & 7 are compulsory:
 #   6. compiler      - Variable name of compiler to use (CC or CXX)
-#   7. compilerFlags - Variable name of compiler flags to use (CFLAGS or CXXFLAGS)
+#   7. compilerFlags - Variable name of compiler flags to use (CFLAGS or CXXFLAGS), after MCM_<compilerFlags>
 # Example:
 #   $(eval $(call program_base,myapp,src/main.o src/utils.o,$(LIBZ_A),strip $$@,$(VERSION),CC,CFLAGS))
 #   $(eval $(call program_base,mycppapp,src/main.o src/utils.o,$(LIBZ_A),strip $$@,$(VERSION),CXX,CXXFLAGS))
@@ -421,14 +434,14 @@ MCM_OBJS_$(1) := $(2)
 MCM_XDEPS_$(1) := $(3)
 MCM_POST_$(1) := $(subst $$,$$$$,$(4))
 MCM_XHASH_$(1) := $(5)
-MCM_LINK_VARS_$(1) := LDFLAGS LDLIBS MCM_STRIP
+MCM_LINK_VARS_$(1) := MCM_LDFLAGS LDFLAGS LDLIBS MCM_STRIP
 MCM_EXE_$(1) := $(EXE)
 
 # The program is built as $(1)$(EXE), the name a Windows linker gives it anyway
 .PRECIOUS: $$(MCM_CACHE_ROOT)/%/$(1)$(EXE)
 $$(MCM_CACHE_ROOT)/%/$(1)$(EXE) : $$$$(call mcm_link_objs,$$$$*,$(2)) $(3) | $$(MCM_CACHE_ROOT)/%/.
 	@echo LD $$@
-	$$($(6)) $$(CPPFLAGS) $$($(7)) $$(call mcm_link_list,$$(MCM_LINK_INPUTS)) -o $$@ $$(LDFLAGS) $$(LDLIBS)
+	$$($(6)) $$(MCM_CPPFLAGS) $$(CPPFLAGS) $$(MCM_$(7)) $$($(7)) $$(call mcm_link_list,$$(MCM_LINK_INPUTS)) -o $$@ $$(MCM_LDFLAGS) $$(LDFLAGS) $$(LDLIBS)
 	$$(if $$(filter 1,$$(MCM_STRIP)),-$$(STRIP) $$@)
 	$(4)
 
