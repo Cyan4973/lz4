@@ -25,6 +25,9 @@ CP_TAG='-DCPPFLAGS_TEST'
 LD_TAG='-DLDFLAGS_TEST'
 LL_TAG='-DLDLIBS_TEST'
 
+# flags the Makefiles need (MCM_* variables), which must stay with the user flags above
+NS_TAG='-DXXH_NAMESPACE=LZ4_'   # every compile command (lib/, programs/)
+
 compile_seen=0 ; compile_ok=0
 link_seen=0    ; link_ok=0
 fail=0
@@ -61,6 +64,7 @@ do
         case "$line" in *"$CC_TAG"*) : ;; *) ok=0 ;; esac
         case "$line" in *"$CF_TAG"*) : ;; *) ok=0 ;; esac
         case "$line" in *"$CP_TAG"*) : ;; *) ok=0 ;; esac
+        case "$line" in *"$NS_TAG"*) : ;; *) ok=0 ;; esac
         if [ "$ok" -eq 1 ]; then
             compile_ok=$((compile_ok + 1))
         else
@@ -71,6 +75,10 @@ do
         ok=1
         case "$line" in *"$LD_TAG"*) : ;; *) ok=0 ;; esac
         case "$line" in *"$LL_TAG"*) : ;; *) ok=0 ;; esac
+        case "$line" in *' -shared '*)          # shared library : position independent, with a soname
+            case "$line" in *-fPIC*) : ;; *) ok=0 ;; esac
+            case "$line" in *-soname*|*-install_name*) : ;; *) ok=0 ;; esac ;;
+        esac
         if [ "$ok" -eq 1 ]; then
             link_ok=$((link_ok + 1))
         else

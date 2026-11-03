@@ -7,13 +7,13 @@ This guide is for whoever adds multiconf.make to a project, or updates the copy 
 
 | The project's copy of multiconf.make has | Version | Then read |
 | --- | --- | --- |
-| `MCM_VERSION := x.y.z` | that version | the history of this repository since that version |
+| `MCM_VERSION := x.y.z` | that version | the history of the multiconf.make repository since that version |
 | `MCM_CACHE_ROOT ?= .cache/multiconf`, no `MCM_VERSION` | the OpenZL version, before 2.0.0 | [3.2](#32-from-the-openzl-version) |
 | `CACHE_ROOT ?= cachedObjs` | version 1 | [3.1](#31-from-version-1) |
 | no copy | | [README.md](README.md), then [4](#4-look-for-these-patterns) |
 
 A copy can also have local changes, which replacing it loses, often without an error: a variable that the new version does not read is ignored.
-Find the version of this repository closest to the copy, then compare them (in a clone of this repository, with the path of the copy):
+Find the version of multiconf.make closest to the copy, then compare them (in a clone of the multiconf.make repository, with the path of the copy):
 
 ```sh
 copy=../project/build/make/multiconf.make
@@ -23,16 +23,17 @@ done | sort -n | head -n 1   # lines that differ, closest commit
 git show <commit>:multiconf.make | diff - "$copy"
 ```
 
-Carry each change over to the Makefile (target flags, `mcm_order_deps`), or into this repository. For example:
+Carry each change over to the Makefile (target flags, `mcm_order_deps`), or into the multiconf.make repository. For example:
 
 - `OBJ_DEPS`, prerequisites of all objects (xxHash, for its generated `xxhash.h`): `$(call mcm_order_deps,$(C_OBJS),xxhash.h)`.
-- No `-fPIC` on Windows (lz4): `-fPIC` is no longer added, the Makefile sets it, e.g. `liblz4.so: override CFLAGS += -fPIC`, except on Windows.
+- No `-fPIC` on Windows (lz4): `-fPIC` is no longer added, the Makefile sets it, e.g. `liblz4.so: MCM_CFLAGS += -fPIC`, except on Windows.
 
 ## 2. Replace the file
 
 - Copy `multiconf.make` whole, over the project's copy.
-- Do not modify it. A local change is lost at the next update, and makes the copies of the projects diverge.
-  If multiconf.make needs a change, make it in this repository.
+  Copy `README.md` and `INTEGRATION.md` next to it: they document this version for the project's contributors, and link only to each other.
+- Do not modify `multiconf.make`. A local change is lost at the next update, and makes the copies of the projects diverge.
+  If multiconf.make needs a change, make it in the multiconf.make repository.
 - The cache is `.cache/multiconf/` (it was `cachedObjs/` in version 1), in each directory where make runs: ignore `.cache/` in version control, at any depth (no leading `/`).
 - In a tree of Makefiles, keep a single copy (e.g. `build/make/multiconf.make`), included by each Makefile that declares targets: see [Makefile trees](README.md#makefile-trees).
 - The first build after an update may recompile everything: from any version before 2.0.0, it does.
@@ -46,15 +47,21 @@ Carry each change over to the Makefile (target flags, `mcm_order_deps`), or into
   Replace lists built with `$(notdir ...)` with paths, e.g. `$(filter src/%,$(C_OBJS))`.
 - **Sources.** Sources below the current directory are discovered: remove `C_SRCDIRS`, `CXX_SRCDIRS`, `ASM_SRCDIRS` and `vpath` settings made for them.
   Keep these variables for directories outside the current directory, or excluded with `MCM_EXCLUDE_DIRS`. They are not recursive.
+  A directory removed from these variables loses its `vpath`: a target that make's built-in rules build from a source there stops with `No rule to make target`.
+  Find: `make -n <target>`, for each target without a recipe of its own (e.g. those of the tests and of the CI).
+  Fix: a rule with the path of the source, e.g. `abiTest: compat/abiTest.c`, with the recipe `$(LINK.c) $^ $(LOADLIBES) $(LDLIBS) -o $@`.
 - **Renamed variables.** `CACHE_ROOT` becomes `MCM_CACHE_ROOT`. `EXT` becomes `EXE`, which is `.exe` by default on native Windows.
   A project that sets `EXT` itself, from its own platform detection, e.g. to cross-compile for Windows, sets `EXE = $(EXT)` before the macro calls.
 - **Commands after the link** (4th parameter of `c_program` and `cxx_program`): the built file is `$$@`, where version 1 needed `$$$$@`.
 - **Assembly sources** (`.S`) are built with `CFLAGS`, where version 1 used `CXXFLAGS`.
-- **`c_dynamic_library`** no longer adds `-fPIC`: set it on the library, where the platform needs it, e.g. `libfoo.so: override CFLAGS += -fPIC` ([4.1](#41-target-flags-and-the-command-line)).
+- **`c_dynamic_library`** no longer adds `-fPIC`: set it on the library, where the platform needs it, e.g. `libfoo.so: MCM_CFLAGS += -fPIC` ([4.1](#41-target-flags-and-the-command-line)).
 - **`static_library`** no longer sets `ARFLAGS = rcs`: make's default is `rv`, which lists each archived object. To keep `rcs`, set `ARFLAGS = rcs`.
 - `c_program_shared_o` and `cxx_program_shared_o` are aliases of `c_program` and `cxx_program`.
 - **`UNAME`** is no longer set by multiconf.make: a Makefile that reads it sets it first, e.g. `UNAME := $(shell uname)`.
   Find: `grep -n UNAME Makefile`.
+- **Default goal.** With version 1, `make` without a goal ran `clean_cache` when the first target of the Makefile came after the include.
+  multiconf.make no longer sets the default goal: `make` builds the first target of the Makefile.
+  Find: a Makefile whose first target comes after `include ... multiconf.make`.
 - Then check every pattern of [4](#4-look-for-these-patterns): version 1 had none of these checks.
 
 ### 3.2 From the OpenZL version
@@ -63,7 +70,7 @@ Carry each change over to the Makefile (target flags, `mcm_order_deps`), or into
   Find: `grep -n -F '$$$$@' Makefile`.
 - **`EXE`** is `.exe` by default on Windows, and programs are built as `name$(EXE)` in the cache too.
 - **`MCM_STRIP`** is read when the binary is linked: it can be set for a single target (`app: MCM_STRIP := 1`).
-- **`c_dynamic_library`** no longer adds `-fPIC`: set it on the library, where the platform needs it, e.g. `libfoo.so: override CFLAGS += -fPIC` ([4.1](#41-target-flags-and-the-command-line)).
+- **`c_dynamic_library`** no longer adds `-fPIC`: set it on the library, where the platform needs it, e.g. `libfoo.so: MCM_CFLAGS += -fPIC` ([4.1](#41-target-flags-and-the-command-line)).
 - **`static_library`** no longer sets `ARFLAGS = rcs`: make's default is `rv`, which lists each archived object. To keep `rcs`, set `ARFLAGS = rcs`.
 - **Response files** (`MCM_LD_RESPONSE_FILE=1`) are written next to their binary, in the cache. `make clean` no longer deletes `*.rsp` files of the current directory.
 - **Sources outside the current directory** (`../lib/f.c`): their objects stay in the cache directory of their flags, under `__/` for each `../`. Rules or variables written for such an object must use that name ([4.3](#43-rules-and-variables-written-for-objects)).
@@ -81,11 +88,27 @@ Each pattern below builds without error with some versions of GNU make, and sile
 app: CFLAGS += -O3
 ```
 
-A variable set on the command line (`make CFLAGS=-g`, or `$(MAKE) app CFLAGS="$(CFLAGS) -m32"` in a recipe) replaces the values set on targets: `app` is then built without `-O3`. This is how GNU make works, with or without multiconf.make.
+A variable set on the command line (`make CFLAGS=-g`, or `$(MAKE) app CFLAGS="$(CFLAGS) -m32"` in a recipe) replaces the values set by the Makefile, those of targets too: `app` is then built without `-O3`. This is how GNU make works, with or without multiconf.make.
+make passes the command line to sub-makes: `make CFLAGS=-g` at the top also replaces the `CFLAGS` of `lib/Makefile`.
 
-**Fix**, where the flags of a target must apply in any case: `app: override CFLAGS += -O3`.
-Do it at least for the targets that a sub-make builds with flags on its command line.
-Flags that a library needs, such as `-fPIC`, too: `libfoo.so: override CFLAGS += -fPIC`.
+**Fix**: the flags the build needs go to `MCM_CPPFLAGS`, `MCM_CFLAGS`, `MCM_CXXFLAGS` and `MCM_LDFLAGS`, with a plain `+=`: include paths, `-fPIC`, a soname, the defines that select the code ([Flags the build needs](README.md#flags-the-build-needs)).
+Defaults the user may replace, such as `-O3` or warnings, stay in `CFLAGS`.
+
+```make
+MCM_CPPFLAGS += -Iinclude
+libfoo.so: MCM_CFLAGS += -fPIC
+libfoo.so: MCM_LDFLAGS += -Wl,-soname,libfoo.so.1
+```
+
+**Find**:
+- The flags the build needs, in `CPPFLAGS`, `CFLAGS`, `CXXFLAGS` and `LDFLAGS`, with or without `override`: `grep -n -E '^([^#]*[^_[:alnum:]])?(CPPFLAGS|CFLAGS|CXXFLAGS|LDFLAGS)[[:space:]]*[+:?]?=' Makefile`.
+  Move them to the `MCM_` variables, without `override`.
+- The recipes that spell these variables, e.g. `$(CC) $(CFLAGS) $(CPPFLAGS) -c`, or a variable of the project, such as `ALLFLAGS`: `grep -n -E '\$\((CPPFLAGS|CFLAGS|CXXFLAGS|LDFLAGS)\)' Makefile`.
+  Add each `MCM_` variable right before its user variable, or use `$(COMPILE.c)` and `$(LINK.c)`.
+  Make's built-in rules, and the recipes written with `$(COMPILE.c)`, `$(LINK.c)`, `$(COMPILE.cc)` or `$(LINK.cc)`, need nothing, unless the Makefile defines these variables itself.
+
+A flag set with `override` (`app: override CFLAGS += -O3`) stays too, but the later assignments of the variable on that target are then ignored unless they have `override` too, even without a command line:
+after `libfoo.so: override CFLAGS += -fPIC`, `libfoo.so: CFLAGS += -DSHARED` is lost.
 
 ### 4.2 Rules that depend on a binary
 
@@ -110,7 +133,7 @@ Objects built by the project's own rules (from a generated source, for example) 
 MCM_EXTRA_OBJS := src/parser.o
 $(MCM_CACHE_ROOT)/%/src/parser.o: src/parser.y | $(MCM_CACHE_ROOT)/%/src/.
 	bison -o $(@:.o=.c) $<
-	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $(@:.o=.c) -o $@
+	$(COMPILE.c) -MMD -MP $(@:.o=.c) -o $@
 ```
 
 `-MMD -MP` writes the header dependencies of the object next to it, where multiconf.make reads them: a header change recompiles it.
@@ -128,6 +151,7 @@ All `.c`, `.cpp`, `.cc` and `.S` files below the current directory are discovere
 Only the objects listed in macro calls are built, but `C_OBJS` and the other lists include them all.
 
 **Find**: the build of [5](#5-verify) compiles sources it should not (tests, examples, vendored code), because the Makefile uses `$(C_OBJS)` or another whole list.
+Also the directories that the project's tests or scripts create below the current directory (e.g. clones of other versions, for compatibility tests): each source found there adds a rule, read at every start of make.
 Large directories without sources (`node_modules`, build directories) only cost their traversal.
 
 **Fix**: filter the lists (`$(filter src/%,$(C_OBJS))`), or exclude directories: `MCM_EXCLUDE_DIRS := docs build */experimental`.
@@ -164,6 +188,8 @@ make all | grep -E '^(CC|CXX) '               # 4. recompiles only the objects t
 make clean && ls -a                           # 5. no .cache/multiconf, no links of binaries
 ```
 
+If step 3 fails, or builds without a flag the build needs (`-fPIC`, a soname), that flag is still in `CFLAGS`, `CPPFLAGS` or `LDFLAGS`: see [4.1](#41-target-flags-and-the-command-line).
+
 Then:
 - Run the project's tests, and its CI.
 - On Windows (MSYS2), build with `MCM_LD_RESPONSE_FILE=1` if link lines are long.
@@ -173,4 +199,4 @@ Then:
 - The version replaced, and the version installed (`MCM_VERSION`).
 - Each change made to the Makefile, and the pattern of [3](#3-adapt-the-makefile) or [4](#4-look-for-these-patterns) it answers.
 - The results of [5](#5-verify), including anything that did not behave as described.
-- Problems of multiconf.make itself, or of this guide: to fix in this repository, not in the project's copy.
+- Problems of multiconf.make itself, or of this guide: to fix in the multiconf.make repository, not in the project's copy.

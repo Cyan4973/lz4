@@ -72,12 +72,28 @@ $(eval $(call c_program,app,src/main.o src/util.o))
 Flags set on a target, before or after its macro, are part of its cache key: `app` gets its own objects, and editing these flags recompiles it.
 Targets whose flags are identical share their objects.
 
-A variable set on the command line (`make CFLAGS=-g`) replaces the values set on targets: this is how GNU make works.
-For target flags to apply in any case, set them with `override`:
+A variable set on the command line (`make CFLAGS=-g`) replaces the values set by the Makefile, those of targets too: this is how GNU make works.
+The flags the build needs have variables of their own, which stay.
+
+### Flags the build needs
+
+Flags without which the build fails, or builds something else (include paths, `-fPIC`, a soname, the defines that select the code), go to `MCM_CPPFLAGS`, `MCM_CFLAGS`, `MCM_CXXFLAGS` and `MCM_LDFLAGS`, globally or for a target.
+The user does not set them: they stay when `CPPFLAGS`, `CFLAGS`, `CXXFLAGS` or `LDFLAGS` are set on the command line.
 
 ```make
-app: override CFLAGS += -O3 -DNDEBUG
+MCM_CPPFLAGS += -Iinclude
+libutil.so: MCM_CFLAGS += -fPIC
+libutil.so: MCM_LDFLAGS += -Wl,-soname,libutil.so.1
 ```
+
+Each command places them right before `CPPFLAGS`, `CFLAGS`, `CXXFLAGS` and `LDFLAGS`: the user's flags come last, and win where they conflict.
+They are part of the cache keys, like the user's variables.
+Defaults the user may replace, such as `-O3` or warnings, stay in `CFLAGS`.
+Libraries (`-lm`) stay in `LDLIBS`, after the objects: `MCM_LDFLAGS` comes before them in the links of shared libraries and of make's built-in rules.
+There is no `MCM_LDLIBS`: make's built-in rules write `$(LDLIBS)` in their recipes.
+
+Make's built-in rules (`prog: prog.c`), and recipes written with their variables (`$(COMPILE.c)`, `$(LINK.c)`, `$(COMPILE.cc)`, `$(LINK.cc)`), get them too.
+Other recipes of the Makefile add them where they use `CPPFLAGS`, `CFLAGS`, `CXXFLAGS` or `LDFLAGS`, each right before its user variable.
 
 ### Flags inherited from a parent target
 
@@ -95,7 +111,7 @@ make passes `-m32` to `app`, which gets its own objects, as with its own flags, 
 Each Makefile that declares targets includes multiconf.make, e.g. `lib/Makefile` and `programs/Makefile`, run by sub-makes of the top Makefile.
 
 - Each directory where make runs has its own cache, e.g. `lib/.cache/multiconf/`, deleted by its own `make clean`. In version control, ignore `.cache/` at any depth: no leading `/`.
-- Variables set on the command line (`make CFLAGS=-O3`) reach the sub-makes: GNU make passes them on.
+- Variables set on the command line (`make CFLAGS=-O3`) reach the sub-makes: GNU make passes them on. The flags each Makefile needs stay: see [Flags the build needs](#flags-the-build-needs).
 - A cache outside of the current directory (`make MCM_CACHE_ROOT=/tmp/cache`) is shared by the directories: the current directory is then part of the cache keys, so that the `src/main.o` of each directory stay apart. `make clean` in one directory deletes it whole. On Windows, see [Notes and limitations](#notes-and-limitations).
 - multiconf.make can be included more than once, e.g. by two included files: only the first inclusion counts.
 
@@ -110,8 +126,8 @@ Each macro is used as `$(eval $(call macro,parameters))`.
 | `c_program` | an executable, linked with `$(CC)` |
 | `cxx_program` | an executable, linked with `$(CXX)` |
 | `static_library` | a static library, archived with `$(AR) $(ARFLAGS)`: `rv` unless the Makefile sets it |
-| `c_dynamic_library` | a shared library, linked with `$(CC) -shared`. Its objects are compiled with its flags: add `-fPIC` where the platform needs it, e.g. `libutil.so: override CFLAGS += -fPIC`, which also applies with `make CFLAGS=...` |
-| `cxx_dynamic_library` | a shared library, linked with `$(CXX) -shared`, for C++ objects: add `-fPIC` to `CXXFLAGS` |
+| `c_dynamic_library` | a shared library, linked with `$(CC) -shared`. Its objects are compiled with its flags: add `-fPIC` where the platform needs it, e.g. `libutil.so: MCM_CFLAGS += -fPIC` |
+| `cxx_dynamic_library` | a shared library, linked with `$(CXX) -shared`, for C++ objects: add `-fPIC` to `MCM_CXXFLAGS` |
 | `program_base` | an executable, with an explicit compiler and flags variable |
 
 `c_program_shared_o` and `cxx_program_shared_o` remain, as aliases of `c_program` and `cxx_program`.
@@ -123,7 +139,7 @@ Each macro is used as `$(eval $(call macro,parameters))`.
 | 3 | extra dependencies | Optional. Files built by their own rules, outside the cache, passed to the linker, except headers. `static_library` only archives object files. |
 | 4 | commands | Optional. Run after the link. The built file is `$$@`. |
 | 5 | extra hash | Optional, `static_library`, `c_dynamic_library`, `cxx_dynamic_library` and `program_base` only. Additional key for the cache directory. |
-| 6, 7 | compiler, flags | `program_base` only: `CC` and `CFLAGS`, or `CXX` and `CXXFLAGS`. |
+| 6, 7 | compiler, flags | `program_base` only: `CC` and `CFLAGS`, or `CXX` and `CXXFLAGS`. `MCM_` followed by the name of the flags (`MCM_CFLAGS`) comes before them. |
 
 ```make
 $(eval $(call program_base,app,src/main.o src/util.o,$(LIBZ_A),strip $$@,$(VERSION),CC,CFLAGS))
@@ -148,7 +164,7 @@ Objects built by rules of your Makefile, e.g. from a generated source, must be d
 MCM_EXTRA_OBJS := src/parser.o
 $(MCM_CACHE_ROOT)/%/src/parser.o: src/parser.y | $(MCM_CACHE_ROOT)/%/src/.
 	bison -o $(@:.o=.c) $<
-	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $(@:.o=.c) -o $@
+	$(COMPILE.c) -MMD -MP $(@:.o=.c) -o $@
 ```
 
 `-MMD -MP` writes the header dependencies of the object next to it, where multiconf.make reads them: a header change recompiles it.
@@ -166,6 +182,7 @@ For an object outside of the current directory, the rule uses its path in the ca
 | `C_SRCDIRS`, `CXX_SRCDIRS`, `ASM_SRCDIRS` | Directories added to the discovered sources, e.g. excluded ones. Not recursive. |
 | `C_SRCS`, `CPP_SRCS`, `CC_SRCS`, `ASM_SRCS` | Replace the discovered sources. So do `C_OBJS`, `CPP_OBJS`, `CC_OBJS`, `ASM_OBJS`. |
 | `MCM_EXTRA_OBJS` | Objects built by rules of your Makefile. Set it before the macro calls. |
+| `MCM_CPPFLAGS`, `MCM_CFLAGS`, `MCM_CXXFLAGS`, `MCM_LDFLAGS` | Flags the build needs, set by the Makefile, globally or for a target. They stay when the user sets `CPPFLAGS`, `CFLAGS`, `CXXFLAGS` or `LDFLAGS`: see [Flags the build needs](#flags-the-build-needs). |
 | `MCM_STRIP` | `1`: strip programs and shared libraries after the link. Can be set for a single target (`app: MCM_STRIP := 1`). |
 | `MCM_LD_RESPONSE_FILE` | `1`: pass the object list through a file, for small command line limits (Windows). The file, `app.rsp`, is next to the binary in the cache. Requires GNU make 4.0. Can be set for a single binary (`app: MCM_LD_RESPONSE_FILE := 1`). |
 | `EXE` | Executable suffix, `.exe` by default on Windows (`OS=Windows_NT`, also set in MSYS2 and Cygwin). Programs are built and linked as `name$(EXE)`. Set it before the macro calls. |
@@ -193,7 +210,7 @@ multiconf.make provides `C_OBJS`, `CPP_OBJS`, `CC_OBJS`, `ASM_OBJS`, and `CXX_OB
 ```
 
 - `<global flags>` hashes the compilers and compile flags in effect when multiconf.make is included, and the current directory if `MCM_CACHE_ROOT` is outside of it. Only the header dependencies of this configuration are read.
-- `<target flags>` hashes `CC CXX CPPFLAGS CFLAGS CXXFLAGS` as seen by the target, including its own flags. All of them, for every target: changing `CXXFLAGS` also recompiles C programs.
+- `<target flags>` hashes `CC CXX CPPFLAGS CFLAGS CXXFLAGS`, and their `MCM_` variables, as seen by the target, including its own flags. All of them, for every target: changing `CXXFLAGS` also recompiles C programs.
 - `<link key>` hashes the object list, the extra dependencies, the commands run after the link, the link flags and `MCM_STRIP`: changing them only relinks.
 - Objects of sources outside of the current directory stay in the cache directory of their configuration: each `../` becomes `__/`, and an absolute path starts with `__root__/`. `../lib/util.o` is built as `<target flags>/__/lib/util.o`.
 
@@ -223,18 +240,21 @@ This is version `2.0.0`, given by `MCM_VERSION`. The previous version had no num
 - Assembly sources are built with `CFLAGS` instead of `CXXFLAGS`.
 - `c_dynamic_library` no longer adds `-fPIC`, and `static_library` no longer sets `ARFLAGS = rcs`: the Makefile sets them, where needed.
 - `.SECONDEXPANSION` is enabled.
+- `make` without a goal builds the first target of the Makefile: the previous version ran `clean_cache` when that target came after the include.
 - The first build after upgrading recompiles everything.
 
 ---
 
 ## Tests
 
+The tests are in the multiconf.make repository: projects do not copy them.
+
 ```sh
 tests/run_tests.sh [make-command]
 ```
 
 Builds `tests/project` in a temporary directory, and checks incremental rebuilds, the isolation of flags, every macro, and the settings.
-CI runs it on Ubuntu (GNU make 4.4.1, gcc and clang, with and without response files), macOS (GNU make 3.81), and Windows (MSYS2 make, MinGW gcc, with response files).
+CI runs it on Ubuntu (GNU make 4.4.1, gcc and clang, with and without response files), macOS (GNU make 3.81), FreeBSD (gmake, clang), and Windows (MSYS2 make, MinGW gcc, with response files).
 
 ```sh
 tests/mutate.sh [-j jobs] [make-command]
@@ -244,8 +264,8 @@ Checks the test suite itself: each mutation breaks one feature of a copy of mult
 It reports the check that caught each mutation, and fails if one survives, or no longer applies after a change to multiconf.make.
 Requires bash and perl. Runs `jobs` test suites at a time, the number of processors by default.
 
-Before changing multiconf.make, read [AGENTS.md](AGENTS.md): the checks to run, and the rules the file follows.
+Before changing multiconf.make, read `AGENTS.md`, in the multiconf.make repository: the checks to run, and the rules the file follows.
 
 ## License
 
-GPLv2 or later, see [LICENSE](LICENSE).
+GPLv2 or later: see the header of `multiconf.make`.

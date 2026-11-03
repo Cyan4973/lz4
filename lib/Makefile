@@ -46,14 +46,16 @@ LIBVER  := $(shell echo $(LIBVER_SCRIPT))
 BUILD_SHARED:=yes
 BUILD_STATIC:=yes
 
-CPPFLAGS+= -DXXH_NAMESPACE=LZ4_
+# flags the build needs go to MCM_CPPFLAGS, MCM_CFLAGS and MCM_LDFLAGS (see multiconf.make) :
+# they stay when CPPFLAGS, CFLAGS or LDFLAGS are set on the command line
+MCM_CPPFLAGS += -DXXH_NAMESPACE=LZ4_
 USERCFLAGS:= -O3 $(CFLAGS)
 DEBUGFLAGS:= -Wall -Wextra -Wcast-qual -Wcast-align -Wshadow \
              -Wswitch-enum -Wdeclaration-after-statement \
              -Wstrict-prototypes -Wmissing-prototypes -Wbad-function-cast \
              -Wundef -Wpointer-arith -Wstrict-aliasing=1
 CFLAGS   = $(DEBUGFLAGS) $(JCC_FLAGS) $(USERCFLAGS)   # JCC_FLAGS : see build/make/lz4defs.make
-ALLFLAGS = $(CFLAGS) $(CPPFLAGS) $(LDFLAGS)
+ALLFLAGS = $(MCM_CFLAGS) $(CFLAGS) $(MCM_CPPFLAGS) $(CPPFLAGS) $(MCM_LDFLAGS) $(LDFLAGS)
 
 SRCFILES := $(sort $(wildcard *.c))
 OBJFILES = $(SRCFILES:.c=.o)
@@ -167,7 +169,7 @@ all32: CFLAGS+=-m32
 all32: all
 
 # multi-threading flags are part of the objects' cache key (last argument)
-liblz4.a: CPPFLAGS += $(STATICLIB_MT_FLAGS)
+liblz4.a: MCM_CPPFLAGS += $(STATICLIB_MT_FLAGS)
 liblz4.a: ARFLAGS = rcs
 ifeq ($(BUILD_STATIC),yes)
 $(eval $(call static_library,liblz4.a,$(OBJFILES),,,$(STATICLIB_MT_FLAGS)))
@@ -190,19 +192,17 @@ liblz4-dll.o: liblz4-dll.rc
 CLEAN += $(LIBLZ4) $(LIBLZ4_EXP)
 # multi-threading flags are part of the objects' cache key (last argument), as for other targets ;
 # the import library is the same for both variants (same exports).
-# override : also applied when CPPFLAGS or LDFLAGS are set on the command line
-$(LIBLZ4): override CPPFLAGS += $(DYNLIB_MT_FLAGS) -DLZ4_DLL_EXPORT=1
-$(LIBLZ4): override LDFLAGS += -Wl,--out-implib,$(LIBLZ4_EXP)
+$(LIBLZ4): MCM_CPPFLAGS += $(DYNLIB_MT_FLAGS) -DLZ4_DLL_EXPORT=1
+$(LIBLZ4): MCM_LDFLAGS += -Wl,--out-implib,$(LIBLZ4_EXP)
 ifeq ($(BUILD_SHARED),yes)
 $(eval $(call c_dynamic_library,$(LIBLZ4),$(OBJFILES),liblz4-dll.o,echo "$(LIBLZ4) created $(DYNLIB_MT_MSG)",$(DYNLIB_MT_FLAGS)))
 endif
 
 else   # not windows
 
-$(LIBLZ4): override CPPFLAGS += $(DYNLIB_MT_FLAGS)   # also when CPPFLAGS is set on the command line
-$(LIBLZ4): CFLAGS += -fPIC
-$(LIBLZ4): override CPPFLAGS += -fvisibility=hidden  # compiles the objects : only API functions (LZ4LIB_API, LZ4FLIB_API) are exported
-$(LIBLZ4): LDFLAGS += $(SONAME_FLAGS) $(filter -pthread,$(DYNLIB_MT_FLAGS))
+$(LIBLZ4): MCM_CPPFLAGS += $(DYNLIB_MT_FLAGS)
+$(LIBLZ4): MCM_CFLAGS += -fPIC -fvisibility=hidden  # only API functions (LZ4LIB_API, LZ4FLIB_API) are exported
+$(LIBLZ4): MCM_LDFLAGS += $(SONAME_FLAGS) $(filter -pthread,$(DYNLIB_MT_FLAGS))
 ifeq ($(BUILD_SHARED),yes)
 $(eval $(call c_dynamic_library,$(LIBLZ4),$(OBJFILES),,echo "$(LIBLZ4) created $(DYNLIB_MT_MSG)",$(DYNLIB_MT_FLAGS)))
 endif
