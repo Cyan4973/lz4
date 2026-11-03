@@ -100,14 +100,14 @@ The table reports median per-file speedups of the range call over repeated point
 
 | Compression | 2 bytes | 8 bytes | 32 bytes | 256 bytes |
 |---|---:|---:|---:|---:|
-| Fast, independent | 1.06× / 1.07× | 1.12× / 1.12× | 1.18× / 1.21× | 1.37× / 1.36× |
-| Fast, dictionary | 1.10× / 1.10× | 1.19× / 1.19× | 1.25× / 1.27× | 1.53× / 1.51× |
-| HC9, independent | 1.08× / 1.08× | 1.16× / 1.16× | 1.23× / 1.25× | 1.33× / 1.33× |
-| HC9, dictionary | 1.22× / 1.25× | 1.45× / 1.48× | 1.58× / 1.61× | 1.83× / 1.84× |
+| Fast, independent | 1.06× / 1.06× | 1.12× / 1.12× | 1.20× / 1.21× | 1.35× / 1.35× |
+| Fast, dictionary | 1.08× / 1.09× | 1.17× / 1.18× | 1.28× / 1.28× | 1.56× / 1.58× |
+| HC9, independent | 1.07× / 1.08× | 1.17× / 1.18× | 1.26× / 1.25× | 1.32× / 1.32× |
+| HC9, dictionary | 1.19× / 1.20× | 1.49× / 1.52× | 1.65× / 1.69× | 1.78× / 1.79× |
 
-Each timing uses five interleaved rounds of at least 5 ms. Offsets are drawn from all 256 sampled offsets per block and mapped into the valid range for that width. This is a separate query schedule from the original point-read benchmarks; ratios are calculated within each range CSV. Lower-level codec and host settings match the earlier runs.
+Each timing uses five interleaved rounds of at least 5 ms. Each timing cycles through eight fixed offsets per block (every 32nd generated offset), mapped into the valid range for that width. Every adaptive iteration count is a multiple of that complete cycle, so all methods time identical requests. This is a separate query schedule from the original point-read benchmarks; ratios are calculated within each range CSV. Lower-level codec and host settings match the earlier runs.
 
-Range calls reduce repeated navigation, but do not replace bulk decoding. In the fast/independent configuration, cached flat 2-byte reads were a median 10.0× faster than a partial decode, while a partial decode was faster than the indexed range at 32 and 256 bytes. Wider matches may require many external point lookups before enough output is available for direct copies. Keep the byte primitive for isolated bytes, range reads for small contiguous values/windows, and compare partial/full decoding when the requested window grows.
+Range calls reduce repeated navigation, but do not replace bulk decoding. In the fast/independent configuration, cached flat 2-byte reads were a median 13.3× faster than a partial decode, while a partial decode was faster than the indexed range at 32 and 256 bytes. Wider matches may require many external point lookups before enough output is available for direct copies. Keep the byte primitive for isolated bytes, range reads for small contiguous values/windows, and compare partial/full decoding when the requested window grows.
 
 Validation adds 128,000 guarded flat/compact ranges over 2,000 generated blocks, dictionaries, short-period overlaps, checkpoint crossings, zero-length/end requests, invalid arguments and reads after freeing flat workspace. Large-offset checks also cross sequence boundaries near the 2.11 GB limit. ASan and UBSan cover the range cases.
 

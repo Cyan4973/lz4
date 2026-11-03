@@ -20,7 +20,7 @@ static double runRange(Corpus* c, RangeSet* set, int mode, int len, size_t itera
         size_t const bi = i % (size_t)c->count;
         Block* b = &c->b[bi];
         int const p =
-            (int)(b->offsets[(i / (size_t)c->count) % QUERIES] % (unsigned)(BLOCK_SIZE - len + 1));
+            (int)(b->offsets[((i / (size_t)c->count) % 8) * 32] % (unsigned)(BLOCK_SIZE - len + 1));
         int j;
         if (mode == 0)
             CHECK(LZ4_pointReadRange(b->index, p, set->output, len) == len);

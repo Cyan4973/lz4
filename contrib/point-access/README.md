@@ -65,7 +65,7 @@ Decoding once for a batch is also useful: the retained flat index beat that base
 
 These are CPU microbenchmarks on RAM-resident input. A decoded cache served requests faster on every input; its memory cost is a full decoded buffer. The index offers a smaller auxiliary cache representation for sparse reads. Full decompression remains preferable when the application needs the complete output.
 
-The range extension is measured separately: 2-byte requests show roughly 6–25% median speedups over two point calls across the tested layouts/configurations, with larger gains for wider windows. Partial decoding can become faster as a contiguous window grows; see the range results for that tradeoff.
+The range extension is measured separately: 2-byte requests show roughly 6–20% median speedups over two point calls across the tested layouts/configurations, with larger gains for wider windows. Partial decoding can become faster as a contiguous window grows; see the range results for that tradeoff.
 
 See [BENCHMARKS.md](BENCHMARKS.md) for the sampling method, baselines, construction costs, raw results and reproduction commands. No cache-hit-rate advantage is assumed in these measurements.
 
