@@ -76,9 +76,7 @@ jobs:
     - name: Install build tools
       run: |
         sudo apt-get update
-        sudo apt-get install tree ninja-build
-        python -m pip install --upgrade pip
-        pip3 install --user meson
+        sudo apt-get install tree ninja-build meson
 
     - name: Display environment info
       run: |
