@@ -1419,7 +1419,8 @@ static size_t LZ4F_flushBlockPartial(LZ4F_cctx_t* cctx, BYTE* dst, size_t dstCap
  * and their outputs are emitted in order by the calling thread.
  * Output only depends on content and flush points :
  * never on nb of workers, scheduling, input slicing, nor stableSrc.
- * nbWorkers is the nb of worker threads compressing jobs : the calling thread only fills and emits them.
+ * nbWorkers is the nb of worker threads compressing jobs : the calling thread fills and emits them,
+ * and compresses the last one at flush points (LZ4F_flush(), LZ4F_compressEnd(), autoFlush), where it waits for all jobs.
  * Without multi-threading support (LZ4F_MULTITHREAD), the calling thread processes jobs alone, producing the same output.
  * If no worker thread can be created, frame compression fails (allocation_failed) ;
  * with fewer threads than requested (ex: system limits), it proceeds with them. */
@@ -1941,8 +1942,9 @@ static void LZ4F_mt_addHistory(LZ4F_mtCtx_t* mt, const BYTE* content, size_t siz
     }
 }
 
-/* submits the job being filled */
-static void LZ4F_mt_submit(LZ4F_mtCtx_t* mt)
+/* submits the job being filled : to worker threads,
+ * or, @inCallingThread, runs it right away with the cctx's own state (states[0], unused by workers) */
+static void LZ4F_mt_submit_internal(LZ4F_mtCtx_t* mt, int inCallingThread)
 {
     LZ4F_mtJob_t* const job = LZ4F_mt_fillingSlot(mt);
     assert(mt->filling);
@@ -1950,11 +1952,19 @@ static void LZ4F_mt_submit(LZ4F_mtCtx_t* mt)
     job->done = 0;
     mt->filling = 0;
     mt->nbSubmitted++;
-    if (LZ4F_pool_submit(mt->pool, LZ4F_mt_runJob, job))
+    if (inCallingThread)
+        LZ4F_mt_runJob(job, 0);
+    else if (LZ4F_pool_submit(mt->pool, LZ4F_mt_runJob, job))
         LZ4F_mt_addWorker(mt);   /* more jobs than idle threads */
     if (mt->prefs->frameInfo.blockMode == LZ4F_blockLinked)
         LZ4F_mt_addHistory(mt, job->src, job->srcSize);   /* job content is only read while job runs */
 }
+
+static void LZ4F_mt_submit(LZ4F_mtCtx_t* mt) { LZ4F_mt_submit_internal(mt, 0); }
+
+/* the calling thread is about to wait for all jobs : it compresses the last one itself,
+ * which saves the synchronization with a worker (same output : jobs don't depend on their state) */
+static void LZ4F_mt_submitLast(LZ4F_mtCtx_t* mt) { LZ4F_mt_submit_internal(mt, 1); }
 
 /* input buffer of a completed job returns to the free stack */
 static void LZ4F_mt_releaseInBuff(LZ4F_mtCtx_t* mt, LZ4F_mtJob_t* job)
@@ -2224,12 +2234,12 @@ static size_t LZ4F_mt_begin(LZ4F_cctx_t* cctx)
 }
 
 /*! LZ4F_mt_flushPoint() :
- *  LZ4F_flush() and LZ4F_compressEnd(), multi-threaded mode : the job being filled is submitted,
+ *  LZ4F_flush() and LZ4F_compressEnd(), multi-threaded mode : the job being filled is compressed by the calling thread,
  *  and all jobs are waited for : input is no longer read, and their output is emitted by LZ4F_mt_emitPartial(). */
 static void LZ4F_mt_flushPoint(LZ4F_mtCtx_t* mt)
 {
     unsigned n;
-    if (mt->filling) LZ4F_mt_submit(mt);
+    if (mt->filling) LZ4F_mt_submitLast(mt);
     for (n = 0; n < mt->nbSubmitted; n++)
         LZ4F_pool_waitDone(mt->pool, &LZ4F_mt_job(mt, n)->done);
 }
@@ -2323,7 +2333,10 @@ static size_t LZ4F_mt_update(LZ4F_cctx_t* cctx,
                 size_t const jobSize = MIN(remaining, mt->jobSize);
                 job->src = ip;
                 job->srcSize = jobSize;
-                LZ4F_mt_submit(mt);
+                if (cctx->prefs.autoFlush && (jobSize == remaining))
+                    LZ4F_mt_submitLast(mt);   /* all jobs are waited for before returning */
+                else
+                    LZ4F_mt_submit(mt);
                 if (checksum) (void)XXH32_update(&(cctx->xxh), ip, jobSize);
                 ip += jobSize;
                 continue;
@@ -2355,8 +2368,8 @@ static size_t LZ4F_mt_update(LZ4F_cctx_t* cctx,
         mt->stableRun = MIN(prevRun + srcSize, LZ4F_MT_PREFIX_SIZE);
     }
 
-    /* autoFlush : the last job is submitted too, and all jobs are emitted */
-    if (cctx->prefs.autoFlush && mt->filling) LZ4F_mt_submit(mt);
+    /* autoFlush : the last job is compressed by the calling thread, and all jobs are emitted */
+    if (cctx->prefs.autoFlush && mt->filling) LZ4F_mt_submitLast(mt);
     {   size_t const r = LZ4F_mt_emit(mt, dst, dstCapacity, pos, cctx->prefs.autoFlush != 0);
         FORWARD_IF_ERROR_INVALIDATE(r, cctx);
         return pos + r;
