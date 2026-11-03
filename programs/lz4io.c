@@ -884,7 +884,6 @@ static void LZ4IO_readAndProcess(void* arg)
 
 /* Size in bytes of a legacy block header in little-endian format */
 #define LZ4IO_LEGACY_BLOCK_HEADER_SIZE 4
-#define LZ4IO_LEGACY_BLOCK_SIZE_MAX  (8 MB)
 
 /* unoptimized version; solves endianness & alignment issues */
 static void LZ4IO_writeLE32 (void* p, unsigned value32)
@@ -2913,14 +2912,17 @@ static const char * LZ4IO_frameTypeNames[] = {"LZ4Frame", "LegacyFrame", "Skippa
 /* Read block headers and skip block data
    Return total blocks size for this frame including block headers,
    block checksums and content checksums.
-   returns 0 in case it can't successfully skip block data.
+   returns 0 in case it can't successfully skip block data,
+   or a block is larger than the frame's maximum block size (rejected by the decoder too).
    Assumes SEEK_CUR after frame header.
  */
 static unsigned long long
 LZ4IO_skipBlocksData(FILE* finput,
+               const LZ4F_blockSizeID_t blockSizeID,
                const LZ4F_blockChecksum_t blockChecksumFlag,
                const LZ4F_contentChecksum_t contentChecksumFlag)
 {
+    size_t const maxBlockSize = LZ4F_getBlockSize(blockSizeID);   /* blockSizeID already validated by LZ4F_getFrameInfo() */
     unsigned char blockInfo[LZ4F_BLOCK_HEADER_SIZE];
     unsigned long long totalBlocksSize = 0;
     for (;;) {
@@ -2941,6 +2943,7 @@ LZ4IO_skipBlocksData(FILE* finput,
                 }
                 break;
             }
+            if (nextCBlockSize > maxBlockSize) return 0;   /* also keeps nextBlock within LONG_MAX */
             totalBlocksSize += nextBlock;
             /* skip to the next block */
             assert(nextBlock < LONG_MAX);
@@ -2981,15 +2984,14 @@ static unsigned long long LZ4IO_skipLegacyBlocksData(FILE* finput)
                 }
                 break;
             }
-            if (nextCBlockSize > LZ4IO_LEGACY_BLOCK_SIZE_MAX) {
+            if (nextCBlockSize > LZ4_COMPRESSBOUND(LEGACY_BLOCKSIZE)) {   /* same limit as the decoder : incompressible blocks are larger than LEGACY_BLOCKSIZE */
                 DISPLAYLEVEL(4, "Error : block in legacy frame is too large \n");
                 return legacyFrameUndecodable;
             }
             totalBlocksSize += LZ4IO_LEGACY_BLOCK_HEADER_SIZE + nextCBlockSize;
             if (nextCBlockSize == 0) break;   /* end marker (Linux kernel) */
-            /* skip to the next block
-             * note : this won't fail if nextCBlockSize is too large, skipping past the end of finput */
-            if (UTIL_fseek(finput, nextCBlockSize, SEEK_CUR) != 0) {
+            /* skip to the next block : fseek_u32() fails when the block is truncated */
+            if (fseek_u32(finput, nextCBlockSize, SEEK_CUR) != 0) {
                 return legacyFrameUndecodable;
     }   }   }
     return totalBlocksSize;
@@ -3083,6 +3085,7 @@ LZ4IO_getCompressedFileInfo(LZ4IO_cFileInfo_t* cfinfo, const char* input_filenam
                                 && cfinfo->frameCount != 0)
                             cfinfo->eqBlockTypes = 0;
                         {   const unsigned long long totalBlocksSize = LZ4IO_skipBlocksData(finput,
+                                    frameInfo.lz4FrameInfo.blockSizeID,
                                     frameInfo.lz4FrameInfo.blockChecksumFlag,
                                     frameInfo.lz4FrameInfo.contentChecksumFlag);
                             if (totalBlocksSize) {

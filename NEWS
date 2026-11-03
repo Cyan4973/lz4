@@ -22,7 +22,7 @@ cli  : multithreaded compression relies on liblz4 : same output with any nb of t
 cli  : decodes Firefox's mozlz4 files, proposed by @UnitedMarsupials, and legacy frames with the Linux kernel end marker, requested by @benjarobin (frame format documentation by @Artoria2e5)
 cli  : safer file handling : an output identical to the input is refused, a source modified during compression is detected, `--rm` keeps the source after failures, by @Furan666, @Nexory and @immanuwell
 cli  : benchmark (`-b`) measures frames, compressed as `lz4` does with the same options
-cli  : various fixes (`--list`, legacy format, benchmark, `-t -m`, numeric arguments), by @tansy, @jmestwa-coder, @akashdeshmukh-git, @arshsmith1, @jlee303 and @Nexory
+cli  : various fixes (`--list`, legacy format, benchmark, `-t -m`, numeric arguments), by @tansy, @jmestwa-coder, @akashdeshmukh-git, @arshsmith1, @jlee303, @Nexory and @b84330808
 build: dynamic library multithreaded by default, static library single-threaded ; cmake `lz4` multithreaded
 build: cmake : exported `lz4::lz4` target by @dg0yt, CMake 4 support by @GeorgH93, `CMAKE_POSITION_INDEPENDENT_CODE` by @ds-sloth
 build: cmake : as a subproject, the `lz4` program is no longer built by default (`-DLZ4_BUILD_CLI=ON` restores it), by @crueter
