@@ -69,13 +69,13 @@ default: all
 all: fullbench fuzzer frametest unittest datagen checkFrame
 
 .PHONY: all32
-all32: CFLAGS+=-m32
+all32: MCM_CFLAGS += -m32
 all32: all
 
 .PHONY: lz4
 lz4: MAKEFLAGS=
-lz4:
-	$(MAKE) -C $(PRGDIR) $@ CFLAGS="$(CFLAGS)"
+lz4:   # MCM_CFLAGS : -m32 of the *32 targets
+	$(MAKE) -C $(PRGDIR) $@ CFLAGS="$(MCM_CFLAGS) $(CFLAGS)"
 
 .PHONY: lib liblz4.pc
 lib liblz4.pc: MAKEFLAGS=
@@ -88,14 +88,14 @@ lz4c unlz4 lz4cat: lz4
 .PHONY: lz4c32
 lz4c32: MAKEFLAGS=
 lz4c32:  # create a 32-bits version for 32/64 interop tests
-	$(MAKE) -C $(PRGDIR) $@ CFLAGS="-m32 $(CFLAGS)"
+	$(MAKE) -C $(PRGDIR) $@ CFLAGS="$(MCM_CFLAGS) $(CFLAGS)"
 
 # *.o objects are from library
 %.o : $(LIBDIR)/%.c $(LIBDIR)/%.h
 	$(COMPILE.c) $< -o $@
 
 fullbench : DEBUGLEVEL=0
-fullbench : CPPFLAGS += -DNDEBUG
+fullbench : MCM_CPPFLAGS += -DNDEBUG
 $(eval $(call c_program,fullbench,bench/fullbench.o $(LIB_OBJS) $(LIBDIR)/lz4frame.o))
 
 .PHONY: $(LIBDIR)/liblz4.a
@@ -105,7 +105,7 @@ $(LIBDIR)/liblz4.a:
 
 CLEAN += fullbench-lib
 fullbench-lib : DEBUGLEVEL=0
-fullbench-lib : CPPFLAGS += -DNDEBUG
+fullbench-lib : MCM_CPPFLAGS += -DNDEBUG
 fullbench-lib: bench/fullbench.c $(LIBDIR)/liblz4.a
 	$(CC) $(ALLFLAGS) $^ -o $@$(EXT)
 
@@ -113,7 +113,7 @@ fullbench-lib: bench/fullbench.c $(LIBDIR)/liblz4.a
 ifeq ($(WINBASED),yes)
 CLEAN += fullbench-dll
 fullbench-dll : DEBUGLEVEL=0
-fullbench-dll : CPPFLAGS += -DNDEBUG
+fullbench-dll : MCM_CPPFLAGS += -DNDEBUG
 fullbench-dll : MAKEFLAGS=
 fullbench-dll: bench/fullbench.c $(LIBDIR)/xxhash.c
 	$(MAKE) -C $(LIBDIR) liblz4
@@ -136,7 +136,7 @@ UNITTEST_OBJS := $(LIBDIR)/lz4frame.o $(LIBDIR)/lz4file.o $(LIB_OBJS) tools/data
 unittest:
 $(eval $(call c_program_shared_o,unittest,$(UNITTEST_OBJS)))
 
-datagen: CPPFLAGS+=-DNDEBUG
+datagen: MCM_CPPFLAGS += -DNDEBUG
 $(eval $(call c_program,datagen,tools/datagen.o $(PRGDIR)/lorem.o tools/loremOut.o tools/datagencli.o))
 
 checkFrame:
@@ -221,12 +221,12 @@ check: test-lz4-essentials
 
 test: test-lz4 test-lz4c test-frametest test-frameMT-quick test-unittest test-fullbench test-fuzzer test-amalgamation listTest
 
-test32: CFLAGS+=-m32
+test32: MCM_CFLAGS += -m32
 test32: test
 
 test-amalgamation: lz4_all.o
 
-lz4_all.o: CFLAGS += -Werror -std=c90
+lz4_all.o: MCM_CFLAGS += -Werror -std=c90
 
 CLEAN += lz4_all.c
 lz4_all.c: $(LIBDIR)/lz4.c $(LIBDIR)/lz4hc.c $(LIBDIR)/lz4frame.c
@@ -333,7 +333,7 @@ test-lz4c: lz4c datagen
 	@echo "\n ---- test lz4c variant ----"
 	$(DATAGEN) -g256MB | $(LZ4C) -l -v | $(LZ4C) -t
 
-test-lz4c32: CFLAGS+=-m32
+test-lz4c32: MCM_CFLAGS += -m32
 test-lz4c32: test-lz4
 
 test-interop-32-64: lz4 lz4c32 datagen
@@ -365,13 +365,13 @@ endif
 test-fullbench: fullbench
 	./fullbench --no-prompt $(NB_LOOPS) $(TEST_FILES)
 
-test-fullbench32: CFLAGS += -m32
+test-fullbench32: MCM_CFLAGS += -m32
 test-fullbench32: test-fullbench
 
 test-fuzzer: fuzzer
 	./fuzzer $(FUZZER_TIME)
 
-test-fuzzer32: CFLAGS += -m32
+test-fuzzer32: MCM_CFLAGS += -m32
 test-fuzzer32: test-fuzzer
 
 test-frametest: frametest
@@ -389,7 +389,7 @@ test-frameMT-quick: frameMT frameMT-nomt
 	./frameMT-nomt -q > tmp-frameMT-nomt.digest
 	cmp tmp-frameMT.digest tmp-frameMT-nomt.digest
 
-test-frametest32: CFLAGS += -m32
+test-frametest32: MCM_CFLAGS += -m32
 test-frametest32: test-frametest
 
 # random seed : explores more data ; a failure reports its seed

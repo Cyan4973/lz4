@@ -105,7 +105,7 @@ $(V)$(VERBOSE).SILENT:
 all: lz4 lz4-nomt lz4c unlz4 lz4cat
 
 .PHONY: all32
-all32: CFLAGS+=-m32
+all32: MCM_CFLAGS += -m32
 all32: all
 
 LZ4_OBJS := $(OBJFILES)
@@ -136,7 +136,7 @@ endif
 
 .PHONY: lz4-release
 lz4-release: DEBUGFLAGS=
-lz4-release: CPPFLAGS+=-DNDEBUG
+lz4-release: MCM_CPPFLAGS += -DNDEBUG
 lz4-release: lz4
 
 lz4-nomt:
@@ -160,7 +160,7 @@ CLEAN += lz4c
 lz4c: lz4
 	$(LN_SF) lz4$(EXT) lz4c$(EXT)
 
-lz4c32: CFLAGS += -m32
+lz4c32: MCM_CFLAGS += -m32
 $(eval $(call c_program,lz4c32,$(LZ4_OBJS)))
 
 CLEAN += unlz4

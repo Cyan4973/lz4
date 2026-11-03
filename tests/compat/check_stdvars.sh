@@ -5,7 +5,7 @@ set -e   # exit on first command error
 #  check_stdvars.sh  –  verify that user-supplied CC/CFLAGS/CPPFLAGS/LDFLAGS/
 #  LDLIBS reach every compile- and link-command emitted by a recursive Make.
 #
-#  Usage:  tests/compat/check_stdvars.sh build.log
+#  Usage:  tests/compat/check_stdvars.sh build.log [flag]
 #   where build.log is produced with:
 #     make -nr V=1 \
 #          CC='cc -DCC_TEST' \
@@ -14,9 +14,12 @@ set -e   # exit on first command error
 #          LDFLAGS='-DLDFLAGS_TEST' \
 #          LDLIBS='-DLDLIBS_TEST' \
 #          > build.log
+#   flag : optional, a flag the built targets need (ex: -m32 for all32),
+#          which every compile and link command must also contain
 ###############################################################################
 
 log_file=${1:?need build-log file}
+target_tag=${2:-}   # empty : every command matches
 
 # marker flags injected by the Makefile test target
 CC_TAG='-DCC_TEST'
@@ -65,6 +68,7 @@ do
         case "$line" in *"$CF_TAG"*) : ;; *) ok=0 ;; esac
         case "$line" in *"$CP_TAG"*) : ;; *) ok=0 ;; esac
         case "$line" in *"$NS_TAG"*) : ;; *) ok=0 ;; esac
+        case "$line" in *" $target_tag"*) : ;; *) ok=0 ;; esac
         if [ "$ok" -eq 1 ]; then
             compile_ok=$((compile_ok + 1))
         else
@@ -75,6 +79,7 @@ do
         ok=1
         case "$line" in *"$LD_TAG"*) : ;; *) ok=0 ;; esac
         case "$line" in *"$LL_TAG"*) : ;; *) ok=0 ;; esac
+        case "$line" in *" $target_tag"*) : ;; *) ok=0 ;; esac
         case "$line" in *' -shared '*)          # shared library : position independent, with a soname
             case "$line" in *-fPIC*) : ;; *) ok=0 ;; esac
             case "$line" in *-soname*|*-install_name*) : ;; *) ok=0 ;; esac ;;
@@ -86,6 +91,8 @@ do
         fi
     fi
 done < "$log_file"
+
+[ $((compile_seen + link_seen)) -eq 0 ] && report "no compile or link command" "$log_file"
 
 if [ "$fail" -ne 0 ]; then
     echo "standard-variable propagation test FAILED" >&2
