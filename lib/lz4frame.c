@@ -1419,8 +1419,9 @@ static size_t LZ4F_flushBlockPartial(LZ4F_cctx_t* cctx, BYTE* dst, size_t dstCap
  * and their outputs are emitted in order by the calling thread.
  * Output only depends on content and flush points :
  * never on nb of workers, scheduling, input slicing, nor stableSrc.
- * nbWorkers is the nb of worker threads compressing jobs : the calling thread fills and emits them,
- * and compresses the last one at flush points (LZ4F_flush(), LZ4F_compressEnd(), autoFlush), where it waits for all jobs.
+ * nbWorkers is the nb of worker threads compressing jobs : the calling thread fills and emits them.
+ * At a flush point (LZ4F_flush(), LZ4F_compressEnd(), autoFlush), it waits for all jobs : when no other job is running,
+ * it compresses the flushed job itself. So at most nbWorkers threads compress at any time.
  * Without multi-threading support (LZ4F_MULTITHREAD), the calling thread processes jobs alone, producing the same output.
  * If no worker thread can be created, frame compression fails (allocation_failed) ;
  * with fewer threads than requested (ex: system limits), it proceeds with them. */
@@ -1962,9 +1963,9 @@ static void LZ4F_mt_submit_internal(LZ4F_mtCtx_t* mt, int inCallingThread)
 
 static void LZ4F_mt_submit(LZ4F_mtCtx_t* mt) { LZ4F_mt_submit_internal(mt, 0); }
 
-/* the calling thread is about to wait for all jobs : it compresses the last one itself,
+/* the calling thread is about to wait for all jobs : when no other job is running, it compresses the last one itself,
  * which saves the synchronization with a worker (same output : jobs don't depend on their state) */
-static void LZ4F_mt_submitLast(LZ4F_mtCtx_t* mt) { LZ4F_mt_submit_internal(mt, 1); }
+static void LZ4F_mt_submitLast(LZ4F_mtCtx_t* mt) { LZ4F_mt_submit_internal(mt, mt->nbSubmitted == 0); }
 
 /* input buffer of a completed job returns to the free stack */
 static void LZ4F_mt_releaseInBuff(LZ4F_mtCtx_t* mt, LZ4F_mtJob_t* job)
@@ -2234,7 +2235,7 @@ static size_t LZ4F_mt_begin(LZ4F_cctx_t* cctx)
 }
 
 /*! LZ4F_mt_flushPoint() :
- *  LZ4F_flush() and LZ4F_compressEnd(), multi-threaded mode : the job being filled is compressed by the calling thread,
+ *  LZ4F_flush() and LZ4F_compressEnd(), multi-threaded mode : the job being filled is submitted (see LZ4F_mt_submitLast()),
  *  and all jobs are waited for : input is no longer read, and their output is emitted by LZ4F_mt_emitPartial(). */
 static void LZ4F_mt_flushPoint(LZ4F_mtCtx_t* mt)
 {
@@ -2368,7 +2369,7 @@ static size_t LZ4F_mt_update(LZ4F_cctx_t* cctx,
         mt->stableRun = MIN(prevRun + srcSize, LZ4F_MT_PREFIX_SIZE);
     }
 
-    /* autoFlush : the last job is compressed by the calling thread, and all jobs are emitted */
+    /* autoFlush : the last job is submitted too (see LZ4F_mt_submitLast()), and all jobs are emitted */
     if (cctx->prefs.autoFlush && mt->filling) LZ4F_mt_submitLast(mt);
     {   size_t const r = LZ4F_mt_emit(mt, dst, dstCapacity, pos, cctx->prefs.autoFlush != 0);
         FORWARD_IF_ERROR_INVALIDATE(r, cctx);
