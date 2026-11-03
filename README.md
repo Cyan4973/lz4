@@ -27,9 +27,9 @@ The `lz4` command line utility is provided under the GPL-2.0-or-later license.
 Benchmarks
 -------------------------
 
-The benchmark uses [lzbench], from @inikep
-compiled with GCC v8.2.0 on Linux 64-bits (Ubuntu 4.18.0-17).
-The reference system uses a Core i7-9700K CPU @ 4.9GHz (w/ turbo boost).
+The benchmark uses [lzbench] v2.4.1, from @inikep
+compiled with GCC v13.3.0 on Linux 64-bits (Ubuntu 24.04).
+The reference system uses a Core i7-9700K CPU.
 Benchmark evaluates the compression of reference [Silesia Corpus]
 in single-thread mode.
 
@@ -39,15 +39,16 @@ in single-thread mode.
 |  Compressor             | Factor  | Compression | Decompression |
 |  ----------             | -----   | ----------- | ------------- |
 |  memcpy                 |  1.000  | 13700 MB/s  |  13700 MB/s   |
-|**LZ4 default (v1.9.0)** |**2.101**| **780 MB/s**| **4970 MB/s** |
-|  LZO 2.09               |  2.108  |   670 MB/s  |    860 MB/s   |
-|  QuickLZ 1.5.0          |  2.238  |   575 MB/s  |    780 MB/s   |
-|  Snappy 1.1.4           |  2.091  |   565 MB/s  |   1950 MB/s   |
-| [Zstandard] 1.4.0 -1    |  2.883  |   515 MB/s  |   1380 MB/s   |
-|  LZF v3.6               |  2.073  |   415 MB/s  |    910 MB/s   |
-| [zlib] deflate 1.2.11 -1|  2.730  |   100 MB/s  |    415 MB/s   |
-|**LZ4 HC -9 (v1.9.0)**   |**2.721**|    41 MB/s  | **4900 MB/s** |
-| [zlib] deflate 1.2.11 -6|  3.099  |    36 MB/s  |    445 MB/s   |
+|**LZ4 default (v1.11.0)**|**2.112**| **770 MB/s**| **4950 MB/s** |
+|  LZO 2.10 -1            |  2.108  |   660 MB/s  |    800 MB/s   |
+|  QuickLZ 1.5.1b7 -1     |  2.238  |   580 MB/s  |    780 MB/s   |
+|  Snappy 1.3.1           |  2.090  |   520 MB/s  |   1350 MB/s   |
+| [Zstandard] 1.5.7 -1    |  2.896  |   510 MB/s  |   1570 MB/s   |
+|  LZF v3.6               |  2.073  |   375 MB/s  |    920 MB/s   |
+|  zlib-ng 2.3.3 -1       |  2.252  |   250 MB/s  |    555 MB/s   |     
+| [zlib] deflate 1.3.2 -1 |  2.743  |   110 MB/s  |    410 MB/s   |
+|**LZ4 HC -9 (v1.11.0)**  |**2.717**|    40 MB/s  | **4800 MB/s** |
+| [zlib] deflate 1.3.2 -6 |  3.106  |    36 MB/s  |    430 MB/s   |
 
 [zlib]: https://www.zlib.net/
 [Zstandard]: https://facebook.github.io/zstd/
