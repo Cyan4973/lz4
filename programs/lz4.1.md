@@ -20,7 +20,7 @@ DESCRIPTION
 
 `lz4` is a CLI based on `liblz4`, an extremely fast implementation of lossless compression algorithm.
 It provides a default compression speed of typically > 500 MB/s per core.
-Speed can traded for better compression ratio, by increasing the compression level parameter.
+Speed can be traded for better compression ratio, by increasing the compression level parameter.
 While decompression is single-threaded, it reaches multiple GB/s, generally fast enough to be I/O bound.
 `lz4` native file format is the `.lz4` format.
 

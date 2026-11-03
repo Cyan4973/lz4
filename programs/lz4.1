@@ -1,5 +1,5 @@
 .
-.TH "LZ4" "1" "July 2024" "lz4 1.10.0" "User Commands"
+.TH "LZ4" "1" "November 2026" "lz4 1.11.0" "User Commands"
 .
 .SH "NAME"
 \fBlz4\fR \- lz4, unlz4, lz4cat \- Compress or decompress \.lz4 files
@@ -17,7 +17,7 @@
 When writing scripts that need to decompress files, it is recommended to always use the name \fBlz4\fR with appropriate arguments (\fBlz4 \-d\fR or \fBlz4 \-dc\fR) instead of the names \fBunlz4\fR and \fBlz4cat\fR\.
 .
 .SH "DESCRIPTION"
-\fBlz4\fR is a CLI based on \fBliblz4\fR, an extremely fast implementation of lossless compression algorithm\. It provides a default compression speed of typically > 500 MB/s per core\. Speed can traded for higher compression ratio, by increasing the compression level parameter\. While decompression is single\-threaded, it reaches multiple GB/s, generally fast enough to be I/O bound\. \fBlz4\fR native file format is the \fB\.lz4\fR format\.
+\fBlz4\fR is a CLI based on \fBliblz4\fR, an extremely fast implementation of lossless compression algorithm\. It provides a default compression speed of typically > 500 MB/s per core\. Speed can be traded for better compression ratio, by increasing the compression level parameter\. While decompression is single\-threaded, it reaches multiple GB/s, generally fast enough to be I/O bound\. \fBlz4\fR native file format is the \fB\.lz4\fR format\.
 .
 .SS "Difference between lz4 and gzip"
 \fBlz4\fR supports a command line syntax similar \fIbut not identical\fR to \fBgzip(1)\fR\. Differences are :
@@ -113,11 +113,11 @@ List information about \.lz4 files\. For detailed information on files with mult
 .
 .TP
 \fB\-#\fR
-Compression level, with # being any value from 1 to 12\. Higher values trade compression speed for compression ratio\. Values above 12 are considered the same as 12\. Recommended values are 1 for fast compression (default), and 9 for high compression\. Speed/compression trade\-off will vary depending on data to compress\. Decompression speed remains fast at all settings\.
+Compression level, with # being any value from 1 to 12\. Higher values trade compression speed for better compression ratio\. Values above 12 are considered the same as 12\. Recommended values are 1 for fast compression (default), and 9 for high compression\. Speed/compression trade\-off will vary depending on data to compress\. Decompression speed remains fast at all settings\.
 .
 .TP
 \fB\-\-fast[=#]\fR
-Switch to ultra\-fast compression levels\. The higher the value, the faster the compression speed, at the cost of some compression ratio\. If \fB=#\fR is not present, it defaults to \fB1\fR\. Values above \fB65536\fR make no difference\. This setting overrides compression level if one was set previously\. Similarly, if a compression level is set after \fB\-\-fast\fR, it overrides it\.
+Switch to ultra\-fast compression levels\. The higher the value, the faster the compression speed, but at the cost of compressed size\. If \fB=#\fR is not present, it defaults to \fB1\fR\. Values above \fB65536\fR make no difference\. This setting overrides compression level if one was set previously\. Similarly, if a compression level is set after \fB\-\-fast\fR, it overrides it\.
 .
 .TP
 \fB\-\-best\fR
