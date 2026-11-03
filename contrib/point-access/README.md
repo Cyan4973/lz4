@@ -1,5 +1,9 @@
 # RFC: indexed point reads with compact decode caches
 
+> **TL;DR:** A reusable index costing about **0.11 bits per decoded byte** removes roughly **95% of the decode CPU cost of a random byte read**, compared with restarting partial decompression.
+
+Measured medians on Silesia with 64 KiB blocks and a retained compact index. Construction is excluded; compressed input and dictionary storage are additional.
+
 This prototype adds general-purpose random-access point reads over LZ4-compressed data. An application builds a reusable index, then reads individual decoded bytes without materializing the whole output. The index caches navigation information rather than decoded contents.
 
 This is a standalone RFC under `contrib/`: it does not change the LZ4 format, the installed library, or its public API. Feedback on the use case, interface and possible home is welcome before library integration.
@@ -9,6 +13,8 @@ This is a standalone RFC under `contrib/`: it does not change the LZ4 format, th
 The primitive operates on one [raw LZ4 block-format payload](../../doc/lz4_Block_format.md), with its compressed size, decoded-size bound and optional dictionary supplied by the caller. Locating blocks in a framed or linked stream and handling frame checksums remain the application's responsibility.
 
 An index records a compressed offset and decoded offset every 256 output bytes. A read starts at a checkpoint and follows back-references until it reaches the requested literal or dictionary byte. Repeated periods in an overlapping match are folded in one step using 32-bit division. Completed indexes are immutable and shareable across readers.
+
+Checkpoints shorten the scan to a decoded position; they do not bound reference-chain depth. A chain across many separate matches can make point reads slower than sequential decoding. Period folding collapses repetition within a match, not ancestry across matches; this is a performance worst case rather than a correctness failure.
 
 ## API sketch
 

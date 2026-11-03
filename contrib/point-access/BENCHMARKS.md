@@ -45,6 +45,14 @@ Microseconds per operation. All read columns serve the same 32 offsets; `Build` 
 | xml | 9.342 | 12.762 | 23.430 | 121.148 | 7.664 | 0.016 |
 <!-- RESULTS:END -->
 
+## Cost per decoded byte
+
+The compact index's median 904–928 bytes per 64 KiB decoded block corresponds to about **0.11 bits of index per decoded byte** (`928 * 8 / 65536 = 0.1133`). This includes context and read padding, but excludes compressed input and dictionary storage.
+
+For the one-byte requests in the range benchmark (`length == 1`), the median per-file compact point-read speedup over a separate safe partial decode is **21.9×** for fast/independent blocks: about **95.4% less CPU time**. The corresponding median reductions are 97.3% for fast/dictionary, 97.1% for HC9/independent and 98.9% for HC9/dictionary. This is the basis of the short summary, with index construction excluded.
+
+These are workload medians, not a bound on every request. Checkpoints limit local navigation but not match ancestry. Adversarial chains across separate matches can make point chasing more expensive than sequential decoding even with a retained index.
+
 ## Methods
 
 The two programs measure different aspects of the same implementation:
