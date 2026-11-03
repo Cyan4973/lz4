@@ -111,3 +111,28 @@ if [ "$(uname)" = Linux ] && [ -w /dev/full ]; then
     cp $FPREFIX-ref.lz4 $FPREFIX-f9.lz4
     kept $FPREFIX-f9.lz4 "lz4 -q --rm -f -d $FPREFIX-f9.lz4 /dev/full"
 fi
+
+# source renamed and replaced (ex: log rotation), or modified, during its processing : --rm keeps the file at its name
+# output goes into a fifo, read only once the source has changed : lz4 is blocked writing its first output
+# (compression : see test-lz4-multithread.sh)
+case "$(uname)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
+command -v mkfifo > /dev/null || exit 0
+lz4 -q -f $FPREFIX-big $FPREFIX-big.lz4
+# decompressChanged MODIFICATION : decompresses $FPREFIX-rot.lz4 into $FPREFIX-rot with --rm
+decompressChanged() {
+    rm -f $FPREFIX-rot* $FPREFIX.fifo
+    cp $FPREFIX-big.lz4 $FPREFIX-rot.lz4
+    touch -t 200001010000 $FPREFIX-rot.lz4   # modification detected even with 1-second timestamps
+    mkfifo $FPREFIX.fifo
+    lz4 -q -f -d --no-sparse --rm $FPREFIX-rot.lz4 $FPREFIX.fifo &
+    pid=$!
+    { dd bs=4 count=1 2> /dev/null; $1 < /dev/null; cat; } < $FPREFIX.fifo > $FPREFIX-rot
+    wait $pid
+    cmp $FPREFIX-rot $FPREFIX-big
+}
+replaceSrc() { mv $FPREFIX-rot.lz4 $FPREFIX-rot.old; echo "new file" > $FPREFIX-rot.lz4; }
+touchSrc()   { touch $FPREFIX-rot.lz4; }
+decompressChanged replaceSrc
+test "$(cat $FPREFIX-rot.lz4)" = "new file"
+decompressChanged touchSrc
+test -f $FPREFIX-rot.lz4
