@@ -128,6 +128,12 @@ if [ "$(uname)" = Linux ]; then   # write errors
     rc=0; lz4 -q --rm -f $FPREFIX-small-keep /dev/full || rc=$?
     isErrorCode $rc
     test -f $FPREFIX-small-keep
+    rc=0; lz4 -q --rm -c $FPREFIX-small-keep > /dev/full || rc=$?   # shared output (stdout)
+    isErrorCode $rc
+    test -f $FPREFIX-small-keep
+    rc=0; lz4 -q --rm -d -c $FPREFIX-small-keep.lz4 > /dev/full || rc=$?
+    isErrorCode $rc
+    test -f $FPREFIX-small-keep.lz4
 fi
 
 
