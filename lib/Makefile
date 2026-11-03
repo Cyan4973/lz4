@@ -165,7 +165,7 @@ lib-nomt:
 all: lib liblz4.pc
 
 .PHONY: all32
-all32: CFLAGS+=-m32
+all32: MCM_CFLAGS += -m32
 all32: all
 
 # multi-threading flags are part of the objects' cache key (last argument)

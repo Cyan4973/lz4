@@ -203,8 +203,8 @@ ctocxxtest:
 	CC=$(EXECC) $(MAKE) -C $(TESTDIR) CFLAGS="$(CFLAGS)" all
 
 .PHONY: cxxtest cxx32test
-cxx32test: CFLAGS += -m32
-cxxtest cxx32test: CC := "$(CXX) -Wno-deprecated"
+cxxtest: CC := "$(CXX) -Wno-deprecated"
+cxx32test: CC := "$(CXX) -Wno-deprecated -m32"   # in CC : CFLAGS is replaced below, or on the command line
 cxxtest cxx32test: CFLAGS = -O3 -Wall -Wextra -Wundef -Wshadow -Wcast-align -Werror
 cxxtest cxx32test:
 	$(CXX) -v
@@ -241,20 +241,21 @@ c_standards_c11: clean
 # The following test ensures that standard Makefile variables set through environment
 # are correctly transmitted at compilation stage.
 # This test is meant to detect issues like https://github.com/lz4/lz4/issues/958
+# Flags a target needs (MCM_* : -m32, -DNDEBUG, -std=c90) must stay with them.
+STDVARS_TEST = CC='cc -DCC_TEST' CFLAGS='-DCFLAGS_TEST' CPPFLAGS='-DCPPFLAGS_TEST' LDFLAGS='-DLDFLAGS_TEST' LDLIBS='-DLDLIBS_TEST'
 .PHONY: test_stdvars
 test_stdvars:  ## CI helper – verifies CC/CFLAGS/CPPFLAGS/LDFLAGS/LDLIBS propagation
 	@echo '--- standard-variable propagation test ---'
 	@$(RM) .stdvars.log
 
-	@$(MAKE) -rn V=1 \
-	    CC='cc -DCC_TEST' \
-	    CFLAGS='-DCFLAGS_TEST' \
-	    CPPFLAGS='-DCPPFLAGS_TEST' \
-	    LDFLAGS='-DLDFLAGS_TEST' \
-	    LDLIBS='-DLDLIBS_TEST' \
-	  | tee .stdvars.log >/dev/null
-
+	@$(MAKE) -rn V=1 $(STDVARS_TEST) | tee .stdvars.log >/dev/null
 	@tests/compat/check_stdvars.sh .stdvars.log
+	@$(MAKE) -rn V=1 -C $(TESTDIR) all32 $(STDVARS_TEST) > .stdvars.log
+	@tests/compat/check_stdvars.sh .stdvars.log -m32
+	@$(MAKE) -rn V=1 -C $(TESTDIR) fullbench datagen $(STDVARS_TEST) > .stdvars.log
+	@tests/compat/check_stdvars.sh .stdvars.log -DNDEBUG
+	@$(MAKE) -nB V=1 -C $(TESTDIR) lz4_all.o $(STDVARS_TEST) > .stdvars.log
+	@tests/compat/check_stdvars.sh .stdvars.log -std=c90
 	@$(RM) .stdvars.log
 
 endif   # MSYS POSIX
