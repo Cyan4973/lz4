@@ -65,7 +65,7 @@ ALLFLAGS  = $(CFLAGS) $(CPPFLAGS) $(LDFLAGS)
 .PHONY:default
 default: lz4-release
 
-C_SRCDIRS = $(LIBLZ4DIR) .
+C_SRCDIRS = $(LIBLZ4DIR)
 include ../build/make/multiconf.make
 
 # thread detection (PTHREAD_PROBE : see build/make/lz4defs.make) : skipped by goals building no multithreaded program,
@@ -107,7 +107,7 @@ all: lz4 lz4-nomt lz4c unlz4 lz4cat
 all32: CFLAGS+=-m32
 all32: all
 
-LZ4_OBJS := $(notdir $(OBJFILES))
+LZ4_OBJS := $(OBJFILES)
 
 ifeq ($(WINBASED),yes)
 lz4-exe.rc: lz4-exe.rc.in

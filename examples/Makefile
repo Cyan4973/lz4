@@ -39,16 +39,16 @@ TESTFILE_SMALL= .gitignore
 LZ4DIR     = ../programs
 LZ4        = $(LZ4DIR)/lz4
 LIBLZ4DIR  = ../lib
-LIBLZ4SRCS = $(notdir $(wildcard $(LIBLZ4DIR)/*.c))
+LIBLZ4SRCS = $(wildcard $(LIBLZ4DIR)/*.c)
 LIBLZ4OBJS = $(LIBLZ4SRCS:.c=.o)
 SLIBLZ4   := liblz4.a
 
 default: all
 
-C_SRCDIRS = . ../lib
+C_SRCDIRS = $(LIBLZ4DIR)
 include ../build/make/multiconf.make
 
-$(SLIBLZ4):
+$(SLIBLZ4): ARFLAGS = rcs
 $(eval $(call static_library,$(SLIBLZ4), $(LIBLZ4OBJS)))
 
 ALL = print_version \

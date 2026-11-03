@@ -168,6 +168,7 @@ all32: all
 
 # multi-threading flags are part of the objects' cache key (last argument)
 liblz4.a: CPPFLAGS += $(STATICLIB_MT_FLAGS)
+liblz4.a: ARFLAGS = rcs
 ifeq ($(BUILD_STATIC),yes)
 $(eval $(call static_library,liblz4.a,$(OBJFILES),,,$(STATICLIB_MT_FLAGS)))
 endif
@@ -199,6 +200,7 @@ endif
 else   # not windows
 
 $(LIBLZ4): override CPPFLAGS += $(DYNLIB_MT_FLAGS)   # also when CPPFLAGS is set on the command line
+$(LIBLZ4): CFLAGS += -fPIC
 $(LIBLZ4): override CPPFLAGS += -fvisibility=hidden  # compiles the objects : only API functions (LZ4LIB_API, LZ4FLIB_API) are exported
 $(LIBLZ4): LDFLAGS += $(SONAME_FLAGS) $(filter -pthread,$(DYNLIB_MT_FLAGS))
 ifeq ($(BUILD_SHARED),yes)

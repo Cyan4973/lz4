@@ -47,9 +47,14 @@ include ../build/make/lz4defs.make
 
 LZ4 := $(PRGDIR)/lz4$(EXT)
 
-# test sources : see README.md
-C_SRCDIRS = $(LIBDIR) $(PRGDIR) . unit fuzz compat bench tools
+# test sources : see README.md ; those of the current directory and below are discovered by multiconf.make,
+# except in the trees built by the compatibility tests
+C_SRCDIRS = $(LIBDIR) $(PRGDIR)
+MCM_EXCLUDE_DIRS := abiTests $(VERSIONSTESTDIR)
 include ../build/make/multiconf.make
+
+# objects are named after their source, from the current directory
+LIB_OBJS := $(LIBDIR)/lz4.o $(LIBDIR)/lz4hc.o $(LIBDIR)/xxhash.o
 
 # Default test parameters
 TEST_FILES   := data/COPYING
@@ -90,7 +95,7 @@ lz4c32:  # create a 32-bits version for 32/64 interop tests
 
 fullbench : DEBUGLEVEL=0
 fullbench : CPPFLAGS += -DNDEBUG
-$(eval $(call c_program,fullbench,fullbench.o lz4.o lz4hc.o lz4frame.o xxhash.o))
+$(eval $(call c_program,fullbench,bench/fullbench.o $(LIB_OBJS) $(LIBDIR)/lz4frame.o))
 
 .PHONY: $(LIBDIR)/liblz4.a
 $(LIBDIR)/liblz4.a: MAKEFLAGS=
@@ -120,21 +125,21 @@ fullbench-wmalloc: CPPFLAGS += -DLZ4_USER_MEMORY_FUNCTIONS
 fullbench-wmalloc: fullbench
 
 fuzzer:
-$(eval $(call c_program_shared_o,fuzzer,lz4.o lz4hc.o xxhash.o fuzzer.o))
+$(eval $(call c_program_shared_o,fuzzer,$(LIB_OBJS) fuzz/fuzzer.o))
 
 frametest:
-$(eval $(call c_program_shared_o,frametest,lz4frame.o lz4.o lz4hc.o xxhash.o frametest.o))
+$(eval $(call c_program_shared_o,frametest,$(LIBDIR)/lz4frame.o $(LIB_OBJS) fuzz/frametest.o))
 
-UNITTEST_OBJS := lz4frame.o lz4file.o lz4.o lz4hc.o xxhash.o datagen.o timefn.o \
-                 unittest.o lz4frame_helpers.o unittest_lz4.o unittest_lz4hc.o unittest_lz4frame.o unittest_lz4frameMT.o
+UNITTEST_OBJS := $(LIBDIR)/lz4frame.o $(LIBDIR)/lz4file.o $(LIB_OBJS) tools/datagen.o $(PRGDIR)/timefn.o \
+                 unit/unittest.o unit/lz4frame_helpers.o unit/unittest_lz4.o unit/unittest_lz4hc.o unit/unittest_lz4frame.o unit/unittest_lz4frameMT.o
 unittest:
 $(eval $(call c_program_shared_o,unittest,$(UNITTEST_OBJS)))
 
 datagen: CPPFLAGS+=-DNDEBUG
-$(eval $(call c_program,datagen,datagen.o lorem.o loremOut.o datagencli.o))
+$(eval $(call c_program,datagen,tools/datagen.o $(PRGDIR)/lorem.o tools/loremOut.o tools/datagencli.o))
 
 checkFrame:
-$(eval $(call c_program_shared_o,checkFrame,lz4.o lz4hc.o xxhash.o lz4frame.o checkFrame.o))
+$(eval $(call c_program_shared_o,checkFrame,$(LIB_OBJS) $(LIBDIR)/lz4frame.o tools/checkFrame.o))
 
 # POSIX threads, except on MinGW and Windows : Windows threads, as in lib/Makefile
 # (clang rejects an unused -pthread with -Werror)
@@ -142,7 +147,7 @@ PTHREAD_LDFLAGS := $(if $(filter MINGW% Windows%,$(TARGET_OS)),,-pthread)
 
 # multi-threaded frame compression : same test, built with and without LZ4F_MULTITHREAD
 # (c_program : objects are not shared, since frameMT employs different flags)
-FRAMEMT_OBJS := lz4frame.o lz4.o lz4hc.o xxhash.o datagen.o timefn.o frameMT.o
+FRAMEMT_OBJS := $(LIBDIR)/lz4frame.o $(LIB_OBJS) tools/datagen.o $(PRGDIR)/timefn.o fuzz/frameMT.o
 # LZ4F_NBWORKERS_MAX=128 (as on 32-bit systems) : keeps the capped test case (1000 workers) affordable
 frameMT: CPPFLAGS += -DLZ4F_MULTITHREAD=1 -DLZ4F_NBWORKERS_MAX=128u
 frameMT: LDFLAGS += $(PTHREAD_LDFLAGS)
@@ -175,13 +180,15 @@ listTest: lz4
 # Note: requires liblz4 installed
 CLEAN += abiTest
 abiTest: LDLIBS += -llz4
+abiTest: compat/abiTest.c
+	$(LINK.c) $^ $(LOADLIBES) $(LDLIBS) -o $@
 
 .PHONY: abiTests
 abiTests:
 	$(PYTHON) compat/test-lz4-abi.py
 
 checkTag:
-$(eval $(call c_program_shared_o,checkTag,checkTag.o))
+$(eval $(call c_program_shared_o,checkTag,compat/checkTag.o))
 
 
 #-----------------------------------------------------------------------------
