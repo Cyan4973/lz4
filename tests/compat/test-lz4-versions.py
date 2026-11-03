@@ -70,7 +70,7 @@ def git(args, pipe=True):
 def get_git_tags():
     stdout, stderr = git(['tag', '-l', 'r[0-9][0-9][0-9]'])
     tags = stdout.decode('utf-8').split()
-    stdout, stderr = git(['tag', '-l', 'v[1-9].[0-9].[0-9]'])
+    stdout, stderr = git(['tag', '-l', 'v[1-9].[0-9].[0-9]', 'v[1-9].[0-9][0-9].[0-9]'])
     tags += stdout.decode('utf-8').split()
     return tags
 
