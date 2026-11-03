@@ -943,43 +943,100 @@ static size_t LZ4IO_compressBlockLegacy_HC(
     return (size_t) cSize + LZ4IO_LEGACY_BLOCK_HEADER_SIZE;
 }
 
-/* LZ4IO_finishCompressedFile() :
- * Once the compressed file is complete : close files,
- * copy owner, permissions and modification time of the source file,
- * remove it with --rm, and display final status.
- * A source modified (@srcModified) or renamed or replaced (@srcReplaced) during compression is kept,
- * and a replaced one doesn't give its attributes */
-static void
-LZ4IO_finishCompressedFile(FILE* srcFile, FILE* dstFile,
-                           const char* srcFileName, const char* dstFileName,
-                           unsigned long long srcSize, unsigned long long cSize,
-                           int srcModified, int srcReplaced,
-                           const LZ4IO_prefs_t* io_prefs)
+/* A source file modified during its processing (compression or decompression) is detected by comparing
+ * its size and times before and after (like tar : "file changed as we read it").
+ * Input read once : the frame holds the content read, ex: a log file growing meanwhile (warning).
+ * Memory-mapped input is read several times : the frame is consistent only if the mapped content is unchanged
+ * (ex: file only grown), verified with the frame's content checksum (warning) ; otherwise, error. */
+typedef struct {
+    int valid;      /* regular file */
+    stat_t st;
+} LZ4IO_srcState_t;
+
+static LZ4IO_srcState_t LZ4IO_getSrcState(FILE* srcFile)
 {
+    LZ4IO_srcState_t s;
+    memset(&s, 0, sizeof(s));
+    s.valid = UTIL_getFDStat(UTIL_fileno(srcFile), &s.st);
+    return s;
+}
+
+static int LZ4IO_srcModified(const LZ4IO_srcState_t* before, FILE* srcFile)
+{
+    LZ4IO_srcState_t const after = LZ4IO_getSrcState(srcFile);
+    if (!before->valid) return 0;   /* not a regular file : can't tell */
+    if (!after.valid) return 1;
+    if ( (before->st.st_size != after.st.st_size)
+      || (before->st.st_mtime != after.st.st_mtime)
+      || (before->st.st_ctime != after.st.st_ctime) )
+        return 1;
+#if !defined(_WIN32) && (PLATFORM_POSIX_VERSION >= 200809L)
+    if ( (before->st.st_mtim.tv_nsec != after.st.st_mtim.tv_nsec)
+      || (before->st.st_ctim.tv_nsec != after.st.st_ctim.tv_nsec) )
+        return 1;
+#endif
+    return 0;
+}
+
+/* @return : 1 if @srcFileName doesn't designate the processed file anymore (ex: log rotation),
+ *           so that --rm would remove another file */
+static int LZ4IO_srcReplaced(const LZ4IO_srcState_t* s, const char* srcFileName)
+{
+#if defined(_WIN32)
+    /* no inode numbers, and st_dev differs between _stat() and _fstat() :
+     * but an open file can't be renamed nor removed there */
+    (void)s; (void)srcFileName;
+    return 0;
+#else
+    stat_t st;
+    if (!s->valid || LZ4IO_isStdin(srcFileName)) return 0;
+    if (!UTIL_getFileStat(srcFileName, &st)) return 1;   /* removed, or not a regular file anymore */
+    return (st.st_dev != s->st.st_dev) || (st.st_ino != s->st.st_ino);
+#endif
+}
+
+/* LZ4IO_finishFile() :
+ * Ends the processing of a source file, compression or decompression, @srcFile being still open :
+ * - the output is closed, or only flushed when shared (@dstShared : stdout, or /dev/null for several inputs) :
+ *   some write errors are only reported then ;
+ * - if processing succeeded (@success), the output gets the owner, permissions and modification time of the source,
+ *   and the source is removed with --rm : this happens only once the output is complete.
+ * A source renamed or replaced during processing gives no attributes, and is kept, as is a source modified meanwhile :
+ * --rm would remove another file, or content missing from the output. */
+static void
+LZ4IO_finishFile(FILE* srcFile, const LZ4IO_srcState_t* srcState,
+                 FILE* dstFile, int dstShared,
+                 const char* srcFileName, const char* dstFileName,
+                 int success, const LZ4IO_prefs_t* io_prefs)
+{
+    int const srcModified = LZ4IO_srcModified(srcState, srcFile);
+    int const srcReplaced = LZ4IO_srcReplaced(srcState, srcFileName);
+    int const writeError = dstShared ? fflush(dstFile) : fclose(dstFile);
     fclose(srcFile);
-    /* write errors may only be reported when buffered output is flushed */
-    if (LZ4IO_isStdout(dstFileName)) {
-        if (fflush(dstFile) != 0) END_PROCESS(49, "Write error : cannot write %s", dstFileName);
-    } else {
-        if (fclose(dstFile) != 0) END_PROCESS(49, "Write error : cannot write %s", dstFileName);
-    }
+    if (!success) return;   /* source kept */
+    if (writeError) END_PROCESS(49, "Write error : cannot write %s", dstFileName);
+
+    if (srcModified || srcReplaced)   /* --rm not honored : also displayed in modes lowering notifications (stdout, multiple files) */
+        DISPLAYLEVEL((io_prefs->removeSrcFile ? 1 : 2), "\rWarning : %s : file %s during processing : output holds the content read%s \n",
+                        srcFileName, srcReplaced ? "renamed or replaced" : "modified",
+                        io_prefs->removeSrcFile ? " ; source kept" : "");
 
     /* Copy owner, file permissions and modification time */
-    {   stat_t statbuf;
-        if (!LZ4IO_isStdin(srcFileName)
-         && !LZ4IO_isStdout(dstFileName)
-         && !LZ4IO_isDevNull(dstFileName)
-         && !srcReplaced
-         && UTIL_getFileStat(srcFileName, &statbuf)) {
-            UTIL_setFileStat(dstFileName, &statbuf);
-    }   }
-
-    if (LZ4IO_mustRemoveSrcFile(io_prefs, srcFileName) && !srcModified && !srcReplaced) {  /* remove source file : --rm */
-        if (remove(srcFileName))
-            END_PROCESS(50, "Remove error : %s: %s", srcFileName, strerror(errno));
+    if ( srcState->valid && !srcReplaced
+      && !LZ4IO_isStdin(srcFileName)
+      && !dstShared && !LZ4IO_isStdout(dstFileName) && !LZ4IO_isDevNull(dstFileName) ) {
+        stat_t statbuf = srcState->st;
+        UTIL_setFileStat(dstFileName, &statbuf);
     }
 
-    /* Final Status */
+    if (LZ4IO_mustRemoveSrcFile(io_prefs, srcFileName) && !srcModified && !srcReplaced) {  /* --rm */
+        if (remove(srcFileName))
+            END_PROCESS(45, "Remove error : %s: %s", srcFileName, strerror(errno));
+    }
+}
+
+static void LZ4IO_displayCompressedFile(unsigned long long srcSize, unsigned long long cSize)
+{
     DISPLAYLEVEL(2, "\r%79s\r", "");
     DISPLAYLEVEL(2, "Compressed %llu bytes into %llu bytes ==> %.2f%%\n",
                     srcSize, cSize,
@@ -1003,6 +1060,7 @@ static int LZ4IO_compressLegacy_internal(unsigned long long* readSize,
     TPool* const tPool = TPool_create(prefs->nbWorkers, 4);
     TPool* const wPool = TPool_create(1, 4);
     WriteRegister wr = WR_init(LEGACY_BLOCKSIZE);
+    LZ4IO_srcState_t srcState;
 
     /* Init & checks */
     *readSize = 0;
@@ -1011,6 +1069,7 @@ static int LZ4IO_compressLegacy_internal(unsigned long long* readSize,
         clResult = 1;
         goto _cfl_clean;
     }
+    srcState = LZ4IO_getSrcState(finput);
     foutput = LZ4IO_openDstFile(output_filename, prefs, input_filename);
     if (foutput == NULL) {
         /* write file error : recoverable */
@@ -1050,8 +1109,9 @@ static int LZ4IO_compressLegacy_internal(unsigned long long* readSize,
         TPool_submitJob(tPool, LZ4IO_readAndProcess, &rjd);
         LZ4IO_waitJobs(tPool, wPool);
 
-        LZ4IO_finishCompressedFile(finput, foutput, input_filename, output_filename,
-                                   rjd.totalReadSize, wr.totalCSize, 0, 0, prefs);
+        LZ4IO_finishFile(finput, &srcState, foutput, LZ4IO_isStdout(output_filename),
+                         input_filename, output_filename, 1, prefs);
+        LZ4IO_displayCompressedFile(rjd.totalReadSize, wr.totalCSize);
         *readSize = rjd.totalReadSize;
     }
 
@@ -1507,58 +1567,6 @@ static void LZ4IO_releaseInput(LZ4IO_cInput_t* in, size_t lag)
 #endif
 }
 
-/* A source file modified during its compression is detected by comparing its size and times
- * before and after (like tar : "file changed as we read it").
- * Input read once : the frame holds the content read, ex: a log file growing meanwhile (warning).
- * Memory-mapped input is read several times : the frame is consistent only if the mapped content is unchanged
- * (ex: file only grown), verified with the frame's content checksum (warning) ; otherwise, error. */
-typedef struct {
-    int valid;      /* regular file */
-    stat_t st;
-} LZ4IO_srcState_t;
-
-static LZ4IO_srcState_t LZ4IO_getSrcState(FILE* srcFile)
-{
-    LZ4IO_srcState_t s;
-    memset(&s, 0, sizeof(s));
-    s.valid = UTIL_getFDStat(UTIL_fileno(srcFile), &s.st);
-    return s;
-}
-
-static int LZ4IO_srcModified(const LZ4IO_srcState_t* before, FILE* srcFile)
-{
-    LZ4IO_srcState_t const after = LZ4IO_getSrcState(srcFile);
-    if (!before->valid) return 0;   /* not a regular file : can't tell */
-    if (!after.valid) return 1;
-    if ( (before->st.st_size != after.st.st_size)
-      || (before->st.st_mtime != after.st.st_mtime)
-      || (before->st.st_ctime != after.st.st_ctime) )
-        return 1;
-#if !defined(_WIN32) && (PLATFORM_POSIX_VERSION >= 200809L)
-    if ( (before->st.st_mtim.tv_nsec != after.st.st_mtim.tv_nsec)
-      || (before->st.st_ctim.tv_nsec != after.st.st_ctim.tv_nsec) )
-        return 1;
-#endif
-    return 0;
-}
-
-/* @return : 1 if @srcFileName doesn't designate the compressed file anymore (ex: log rotation),
- *           so that --rm would remove another file */
-static int LZ4IO_srcReplaced(const LZ4IO_srcState_t* s, const char* srcFileName)
-{
-#if defined(_WIN32)
-    /* no inode numbers, and st_dev differs between _stat() and _fstat() :
-     * but an open file can't be renamed nor removed there */
-    (void)s; (void)srcFileName;
-    return 0;
-#else
-    stat_t st;
-    if (!s->valid || LZ4IO_isStdin(srcFileName)) return 0;
-    if (!UTIL_getFileStat(srcFileName, &st)) return 1;   /* removed, or not a regular file anymore */
-    return (st.st_dev != s->st.st_dev) || (st.st_ino != s->st.st_ino);
-#endif
-}
-
 /* @return : 1 if the mapped content still matches the frame's content checksum (stored in its last 4 bytes),
  *           0 if it differs, or can't be verified (no checksum, or file shrunk : mapped content can't be read) */
 static int LZ4IO_mappedContentUnchanged(const LZ4IO_cInput_t* in, FILE* srcFile,
@@ -1702,7 +1710,6 @@ LZ4IO_compressFilename_extRess(unsigned long long* inStreamSize,
     LZ4F_preferences_t prefs;
     LZ4IO_cInput_t input;
     LZ4IO_srcState_t srcState;
-    int srcModified, srcReplaced;
     unsigned char frameTail[4];    /* last bytes of the frame (content checksum) */
     FILE* dstFile;
     FILE* const srcFile = LZ4IO_openSrcFile(srcFileName);
@@ -1748,10 +1755,8 @@ LZ4IO_compressFilename_extRess(unsigned long long* inStreamSize,
 
     cSize = LZ4IO_compressFrame(&srcSize, frameTail, ress, &input, dstFile, srcFileName, prefs, io_prefs);
 
-    /* source modified, renamed or replaced during compression : kept, even with --rm */
-    srcModified = LZ4IO_srcModified(&srcState, srcFile);
-    srcReplaced = LZ4IO_srcReplaced(&srcState, srcFileName);
-    {   int const inconsistent = srcModified && (input.map != NULL)
+    /* memory-mapped input modified during compression : the frame may be inconsistent */
+    {   int const inconsistent = (input.map != NULL) && LZ4IO_srcModified(&srcState, srcFile)
                 && !LZ4IO_mappedContentUnchanged(&input, srcFile,
                         prefs.frameInfo.contentChecksumFlag == LZ4F_contentChecksumEnabled, frameTail + 4);
         LZ4IO_unmapInput(&input);
@@ -1760,14 +1765,10 @@ LZ4IO_compressFilename_extRess(unsigned long long* inStreamSize,
             if (!LZ4IO_isStdout(dstFileName)) fclose(dstFile);
             if (!LZ4IO_isStdout(dstFileName) && !LZ4IO_isDevNull(dstFileName)) (void)remove(dstFileName);
             END_PROCESS(54, "%s : file modified during compression (memory-mapped) : output removed ; see --no-mmap", srcFileName);
-        }
-        if (srcModified || srcReplaced)   /* --rm not honored : also displayed in modes lowering notifications (stdout, multiple files) */
-            DISPLAYLEVEL((io_prefs->removeSrcFile ? 1 : 2), "\rWarning : %s : file %s during compression : output holds the content read%s \n",
-                            srcFileName, srcReplaced ? "renamed or replaced" : "modified",
-                            io_prefs->removeSrcFile ? " ; source kept" : "");
-    }
+    }   }
 
-    LZ4IO_finishCompressedFile(srcFile, dstFile, srcFileName, dstFileName, srcSize, cSize, srcModified, srcReplaced, io_prefs);
+    LZ4IO_finishFile(srcFile, &srcState, dstFile, LZ4IO_isStdout(dstFileName), srcFileName, dstFileName, 1, io_prefs);
+    LZ4IO_displayCompressedFile(srcSize, cSize);
     *inStreamSize = srcSize;
     return 0;
 }
@@ -2740,20 +2741,28 @@ selectDecoder(dRess_t ress,
 }
 
 
+/* decodes @input_filename into ress.dstFile, shared by several inputs (@dstShared) or not, see LZ4IO_finishFile()
+ * @return : 0 on success, 1 on failure */
 static int
 LZ4IO_decompressSrcFile(unsigned long long* outGenSize,
                         dRess_t ress,
                         const char* input_filename, const char* output_filename,
+                        int dstShared,
                         const LZ4IO_prefs_t* const prefs)
 {
     FILE* const foutput = ress.dstFile;
     unsigned long long filesize = 0;
     int result = 0;
+    LZ4IO_srcState_t srcState;
 
     /* Init */
     FILE* const finput = LZ4IO_openSrcFile(input_filename);
-    if (finput==NULL) return 1;
     assert(foutput != NULL);
+    if (finput==NULL) {
+        if (!dstShared) fclose(foutput);
+        return 1;
+    }
+    srcState = LZ4IO_getSrcState(finput);
 
     /* Loop over multiple streams */
     for ( ; ; ) {  /* endless loop, see break condition */
@@ -2764,26 +2773,16 @@ LZ4IO_decompressSrcFile(unsigned long long* outGenSize,
         filesize += decodedSize;
     }
 
-    /* Close input */
-    fclose(finput);
+    LZ4IO_finishFile(finput, &srcState, foutput, dstShared, input_filename, output_filename, !result, prefs);
 
     /* Final Status */
     DISPLAYLEVEL(2, "\r%79s\r", "");
     DISPLAYLEVEL(2, "%-30.30s : decoded %llu bytes \n", input_filename, filesize);
     *outGenSize = filesize;
-    (void)output_filename;
 
     return result;
 }
 
-
-/* --rm : the source is removed once its decoded content is written,
- * which write errors may only report when the output is closed, or flushed when shared (stdout) */
-static void LZ4IO_removeDecodedSrcFile(const LZ4IO_prefs_t* prefs, const char* input_filename)
-{
-    if (LZ4IO_mustRemoveSrcFile(prefs, input_filename) && remove(input_filename))
-        END_PROCESS(45, "Remove error : %s: %s", input_filename, strerror(errno));
-}
 
 static int
 LZ4IO_decompressDstFile(unsigned long long* outGenSize,
@@ -2792,31 +2791,10 @@ LZ4IO_decompressDstFile(unsigned long long* outGenSize,
                         const char* output_filename,
                         const LZ4IO_prefs_t* const prefs)
 {
-    int result;
-    stat_t statbuf;
-    int stat_result = 0;
     FILE* const foutput = LZ4IO_openDstFile(output_filename, prefs, input_filename);
     if (foutput==NULL) return 1;   /* failure */
-
-    if ( !LZ4IO_isStdin(input_filename)
-      && UTIL_getFileStat(input_filename, &statbuf))
-        stat_result = 1;
-
     ress.dstFile = foutput;
-    result = LZ4IO_decompressSrcFile(outGenSize, ress, input_filename, output_filename, prefs);
-
-    if (fclose(foutput) != 0 && !result) END_PROCESS(70, "Write error : cannot write %s", output_filename);
-
-    /* Copy owner, file permissions and modification time */
-    if ( stat_result != 0
-      && !LZ4IO_isStdout(output_filename)
-      && !LZ4IO_isDevNull(output_filename)) {
-        UTIL_setFileStat(output_filename, &statbuf);
-        /* should return value be read ? or is silent fail good enough ? */
-    }
-
-    if (!result) LZ4IO_removeDecodedSrcFile(prefs, input_filename);
-    return result;
+    return LZ4IO_decompressSrcFile(outGenSize, ress, input_filename, output_filename, 0, prefs);
 }
 
 
@@ -2869,12 +2847,7 @@ int LZ4IO_decompressMultipleFilenames(
         size_t const ifnSize = strlen(inFileNamesTable[i]);
         const char* const suffixPtr = inFileNamesTable[i] + ifnSize - suffixSize;
         if (LZ4IO_isStdout(suffix) || LZ4IO_isDevNull(suffix)) {
-            int const result = LZ4IO_decompressSrcFile(&processed, ress, inFileNamesTable[i], suffix, prefs);
-            if (!result) {
-                if (fflush(ress.dstFile) != 0) END_PROCESS(70, "Write error : cannot write %s", suffix);
-                LZ4IO_removeDecodedSrcFile(prefs, inFileNamesTable[i]);
-            }
-            missingFiles += result;
+            missingFiles += LZ4IO_decompressSrcFile(&processed, ress, inFileNamesTable[i], suffix, 1, prefs);
             totalProcessed += processed;
             continue;
         }
