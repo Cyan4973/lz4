@@ -90,6 +90,33 @@ make bench CFLAGS='-O3 -DNDEBUG -march=native' BENCH_PREFIX='taskset -c 5'
 
 The fetcher downloads from the corpus author's site and checks the published MD5 digests. Corpus files are not included. Use a valid CPU for the host or omit `BENCH_PREFIX`; results are written under ignored `measurements/`, leaving the recorded `results/` snapshot intact. `SILESIA_DIR=/path/to/silesia` reuses an existing corpus directory. Build, test and benchmark code need only this directory and LZ4's `lib/` sources.
 
+## Contiguous range reads
+
+`LZ4_pointReadRange(index, offset, dst, len)` seeks once and walks the requested window forward. Literals and dictionaries copy directly, matches reuse already written output, and indexed point reads resolve sources before the window. The compact entrypoint follows the same shared resolver. Both allocate no internal memory and reject invalid ranges before writing.
+
+These additional runs time **one contiguous request**, not the 32 independent requests in the earlier tables. Indexes are already cached. Widths are 1, 2, 4, 8, 16, 32, 64 and 256 bytes. Repeated-point baselines write each byte to the same destination; the partial-decode baseline decompresses once to the end of the window, then copies the requested bytes. Each configuration uses matching offsets across all methods, five rounds, and checked output against original bytes.
+
+The table reports median per-file speedups of the range call over repeated point calls. Cells are **flat / compact**; values above 1 favor the range call.
+
+| Compression | 2 bytes | 8 bytes | 32 bytes | 256 bytes |
+|---|---:|---:|---:|---:|
+| Fast, independent | 1.06× / 1.07× | 1.12× / 1.12× | 1.18× / 1.21× | 1.37× / 1.36× |
+| Fast, dictionary | 1.10× / 1.10× | 1.19× / 1.19× | 1.25× / 1.27× | 1.53× / 1.51× |
+| HC9, independent | 1.08× / 1.08× | 1.16× / 1.16× | 1.23× / 1.25× | 1.33× / 1.33× |
+| HC9, dictionary | 1.22× / 1.25× | 1.45× / 1.48× | 1.58× / 1.61× | 1.83× / 1.84× |
+
+Each timing uses five interleaved rounds of at least 5 ms. Offsets are drawn from all 256 sampled offsets per block and mapped into the valid range for that width. This is a separate query schedule from the original point-read benchmarks; ratios are calculated within each range CSV. Lower-level codec and host settings match the earlier runs.
+
+Range calls reduce repeated navigation, but do not replace bulk decoding. In the fast/independent configuration, cached flat 2-byte reads were a median 10.0× faster than a partial decode, while a partial decode was faster than the indexed range at 32 and 256 bytes. Wider matches may require many external point lookups before enough output is available for direct copies. Keep the byte primitive for isolated bytes, range reads for small contiguous values/windows, and compare partial/full decoding when the requested window grows.
+
+Validation adds 128,000 guarded flat/compact ranges over 2,000 generated blocks, dictionaries, short-period overlaps, checkpoint crossings, zero-length/end requests, invalid arguments and reads after freeing flat workspace. Large-offset checks also cross sequence boundaries near the 2.11 GB limit. ASan and UBSan cover the range cases.
+
+Reproduce with:
+
+```sh
+make bench-ranges CFLAGS='-O3 -DNDEBUG -march=native' BENCH_PREFIX='taskset -c 5'
+```
+
 ## Raw data
 
 <!-- LINKS:BEGIN -->
@@ -98,3 +125,10 @@ The fetcher downloads from the corpus author's site and checks the published MD5
 - [HC9, independent: flat](results/flat-hc9.csv), [compact](results/mono-hc9.csv)
 - [HC9, dictionary: flat](results/flat-hc9-dict.csv), [compact](results/mono-hc9-dict.csv)
 <!-- LINKS:END -->
+
+### Range results
+
+- [Fast, independent](results/range-fast.csv)
+- [Fast, dictionary](results/range-fast-dict.csv)
+- [HC9, independent](results/range-hc9.csv)
+- [HC9, dictionary](results/range-hc9-dict.csv)

@@ -46,6 +46,7 @@ int main(void)
     LZ4_pointIndex* flat = LZ4_pointIndexInit(flatMemory, flatBytes, size);
     LZ4_pointMonoIndex* mono;
     unsigned char small[65536];
+    unsigned char range[16];
     unsigned char* memory;
     size_t bytes, i;
     int n;
@@ -71,6 +72,12 @@ int main(void)
     CHECK(LZ4_pointMonoRead(mono, cut) == 'R' && LZ4_pointMonoRead(mono, size - 6) == 'R');
     CHECK(LZ4_pointMonoRead(mono, size - 5) == 'E' && LZ4_pointMonoRead(mono, size - 1) == '!');
     CHECK(LZ4_pointMonoRead(mono, size) < 0);
+    CHECK(LZ4_pointMonoReadRange(mono, cut - 4, range, 8) == 8);
+    CHECK(!memcmp(range, "QQQQRRRR", 8));
+    CHECK(LZ4_pointMonoReadRange(mono, size - 8, range, 8) == 8);
+    CHECK(!memcmp(range, "RRREND!!", 8));
+    CHECK(LZ4_pointMonoReadRange(mono, size, NULL, 0) == 0);
+
     for (i = 0; i < 16; ++i)
         CHECK(memory[bytes + i] == 0xa5);
     printf("%d decoded bytes, 31-bit sample/delta values, flat %lu B, compact %lu B, reads after "

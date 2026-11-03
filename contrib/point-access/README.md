@@ -21,9 +21,14 @@ LZ4_pointIndex* LZ4_pointIndexInit(void* workspace, size_t workspaceSize,
 int LZ4_pointIndexBuild(LZ4_pointIndex* index, const void* src, int srcSize,
                       const void* dict, int dictSize);
 int LZ4_pointRead(const LZ4_pointIndex* index, int offset);
+int LZ4_pointReadRange(const LZ4_pointIndex* index, int offset, void* dst, int len);
 ```
 
 The caller allocates malloc-aligned workspace using the returned bound. Building validates and indexes the complete block, returning its decoded length or a negative error. Reading returns a byte in 0–255 or a negative error. A failed build invalidates the previous index.
+
+`LZ4_pointReadRange` copies a contiguous decoded range into caller-owned output and returns its length. Invalid arguments and ranges are rejected before writing; an empty range at the decoded end is valid. The destination must not overlap index workspace, compressed input or dictionary.
+
+The range reader seeks to one checkpoint and walks forward like a decoder. Literals and dictionary data copy directly. Matches reuse already written output, with indexed point lookups only for sources before the requested window. The single-byte API retains its specialized fast path. The compact layout also exposes `LZ4_pointMonoReadRange` with the same contract.
 
 The source and dictionary are borrowed: they must not overlap the workspace and must remain alive and unchanged until all readers finish. Building, reinitializing and releasing workspace require exclusive access. Read-only access needs no internal synchronization. Allocation, cache ownership and eviction remain with the application.
 
@@ -60,6 +65,8 @@ Decoding once for a batch is also useful: the retained flat index beat that base
 
 These are CPU microbenchmarks on RAM-resident input. A decoded cache served requests faster on every input; its memory cost is a full decoded buffer. The index offers a smaller auxiliary cache representation for sparse reads. Full decompression remains preferable when the application needs the complete output.
 
+The range extension is measured separately: 2-byte requests show roughly 6–25% median speedups over two point calls across the tested layouts/configurations, with larger gains for wider windows. Partial decoding can become faster as a contiguous window grows; see the range results for that tradeoff.
+
 See [BENCHMARKS.md](BENCHMARKS.md) for the sampling method, baselines, construction costs, raw results and reproduction commands. No cache-hit-rate advantage is assumed in these measurements.
 
 ## Build and validate
@@ -72,7 +79,7 @@ make check-large
 make check-sanitize
 ```
 
-`check` runs generated-data, dictionary, malformed-input, lifetime and exact-workspace checks, plus C++ compilation. `check-large` exercises offsets across 2,113,929,216 decoded bytes, including 31-bit sample and delta values. Its construction is checked against a full reference decode at 64 KiB; it does not allocate a 2 GiB decoded buffer. Sanitizer tests instrument the prototype and reference codec.
+`check` runs generated-data, dictionary, malformed-input, lifetime, guarded range and exact-workspace checks, plus C++ compilation. `check-large` exercises offsets across 2,113,929,216 decoded bytes, including 31-bit sample and delta values. Its construction is checked against a full reference decode at 64 KiB; it does not allocate a 2 GiB decoded buffer. Sanitizer tests instrument the prototype and reference codec.
 
 The code remains experimental. Dedicated fuzzing, 32-bit execution and additional architectures are needed before production integration.
 
@@ -80,7 +87,7 @@ The code remains experimental. Dedicated fuzzing, 32-bit execution and additiona
 
 - Would this primitive be useful in LZ4, and would an experimental API or a separate component be the right home?
 - Does caller-owned workspace with borrowed source/dictionary buffers fit the intended use?
-- Should byte reads be the initial primitive, or should batch/range access be included?
+- Does a byte plus contiguous-range interface cover the useful cases, or would sparse batched offsets be valuable?
 
 ## Origin and license
 

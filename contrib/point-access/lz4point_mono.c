@@ -148,6 +148,7 @@ static LZ4P_Checkpoint LZ4P_monoCheckpoint(const LZ4_pointMonoIndex* index, size
                     LZ4P_bits(b->deltas, slot * b->deltaBits, b->deltaBits);
     return result;
 }
+#define LZ4P_RANGE_NAME LZ4_pointMonoReadRange
 #define LZ4P_READ_NAME LZ4_pointMonoRead
 #define LZ4P_READ_TYPE LZ4_pointMonoIndex
 #define LZ4P_READ_CHECKPOINT(index, slot) LZ4P_monoCheckpoint(index, slot)

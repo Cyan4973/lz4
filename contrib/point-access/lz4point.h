@@ -32,6 +32,13 @@ LZ4LIB_API int LZ4_pointIndexBuild(LZ4_pointIndex* index, const void* src, int s
  * Wait for all readers before rebuilding, reinitializing or freeing workspace. */
 LZ4LIB_API int LZ4_pointRead(const LZ4_pointIndex* index, int offset);
 
+/* Copy len decoded bytes starting at offset. Returns len, or a negative error
+ * for invalid arguments or an out-of-range request, before writing any bytes.
+ * len == 0 permits a NULL destination and offset == decoded size. Otherwise
+ * dst must provide len writable bytes and must not overlap the index workspace,
+ * compressed input or dictionary. Concurrent reads use separate destinations. */
+LZ4LIB_API int LZ4_pointReadRange(const LZ4_pointIndex* index, int offset, void* dst, int len);
+
 #if defined(__cplusplus)
 }
 #endif

@@ -67,6 +67,7 @@ static void LZ4P_fill(LZ4_pointIndex* index, size_t* next, LZ4P_Checkpoint check
     }
 }
 
+#define LZ4P_RANGE_NAME LZ4_pointReadRange
 #define LZ4P_READ_NAME LZ4_pointRead
 #define LZ4P_READ_TYPE LZ4_pointIndex
 #define LZ4P_READ_CHECKPOINT(index, slot) ((index)->checkpoints[slot])

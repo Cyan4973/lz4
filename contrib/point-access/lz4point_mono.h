@@ -23,6 +23,10 @@ LZ4LIB_API LZ4_pointMonoIndex* LZ4_pointMonoCopy(const LZ4_pointIndex* source, v
                                                  size_t workspaceSize);
 /* Returns a byte in 0..255, or a negative error. Concurrent reads are safe. */
 LZ4LIB_API int LZ4_pointMonoRead(const LZ4_pointMonoIndex* index, int offset);
+/* Same range and destination contract as LZ4_pointReadRange(). */
+LZ4LIB_API int LZ4_pointMonoReadRange(const LZ4_pointMonoIndex* index, int offset, void* dst,
+                                      int len);
+
 #if defined(__cplusplus)
 }
 #endif

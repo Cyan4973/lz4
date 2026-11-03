@@ -42,6 +42,7 @@ int main(void)
     unsigned char* compressed = (unsigned char*)malloc(compressedCapacity);
     void* indexMemory = malloc(indexSize);
     unsigned char small[65536];
+    unsigned char range[16];
     LZ4_pointIndex* index;
     int compressedSize;
     CHECK(compressed && indexMemory);
@@ -60,6 +61,12 @@ int main(void)
     CHECK(LZ4_pointRead(index, size - 6) == 'Q');
     CHECK(LZ4_pointRead(index, size - 5) == 'E');
     CHECK(LZ4_pointRead(index, size - 1) == '!');
+    CHECK(LZ4_pointReadRange(index, size / 2, range, 16) == 16);
+    CHECK(!memcmp(range, "QQQQQQQQQQQQQQQQ", 16));
+    CHECK(LZ4_pointReadRange(index, size - 8, range, 8) == 8);
+    CHECK(!memcmp(range, "QQQEND!!", 8));
+    CHECK(LZ4_pointReadRange(index, size, NULL, 0) == 0);
+
     printf("%d-byte decoded block, %d-byte source, %lu-byte index: passed\n", size, compressedSize,
            (unsigned long)indexSize);
     free(compressed);

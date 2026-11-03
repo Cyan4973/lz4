@@ -9,3 +9,7 @@
 /measurements/
 /silesia/
 /__pycache__/
+
+/test-range
+/test-range-sanitized
+/bench-range
