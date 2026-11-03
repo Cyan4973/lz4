@@ -6,7 +6,7 @@
 # than the prescribed lifecycle of 1.0. In general, we recommend using this generated
 # configuration as a reference rather than using it in production, though in most
 # cases it should duplicate the execution of your original 1.0 config.
-version: 2
+version: 2.1
 jobs:
   build:
     working_directory: ~/lz4/lz4
