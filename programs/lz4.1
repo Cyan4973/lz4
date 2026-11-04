@@ -1,5 +1,5 @@
 .
-.TH "LZ4" "1" "July 2024" "lz4 1.10.0" "User Commands"
+.TH "LZ4" "1" "November 2026" "lz4 1.11.0" "User Commands"
 .
 .SH "NAME"
 \fBlz4\fR \- lz4, unlz4, lz4cat \- Compress or decompress \.lz4 files
@@ -17,7 +17,7 @@
 When writing scripts that need to decompress files, it is recommended to always use the name \fBlz4\fR with appropriate arguments (\fBlz4 \-d\fR or \fBlz4 \-dc\fR) instead of the names \fBunlz4\fR and \fBlz4cat\fR\.
 .
 .SH "DESCRIPTION"
-\fBlz4\fR is a CLI based on \fBliblz4\fR, an extremely fast implementation of lossless compression algorithm\. It provides a default compression speed of typically > 500 MB/s per core\. Speed can traded for higher compression ratio, by increasing the compression level parameter\. While decompression is single\-threaded, it reaches multiple GB/s, generally fast enough to be I/O bound\. \fBlz4\fR native file format is the \fB\.lz4\fR format\.
+\fBlz4\fR is a CLI based on \fBliblz4\fR, an extremely fast implementation of lossless compression algorithm\. It provides a default compression speed of typically > 500 MB/s per core\. Speed can be traded for better compression ratio, by increasing the compression level parameter\. While decompression is single\-threaded, it reaches multiple GB/s, generally fast enough to be I/O bound\. \fBlz4\fR native file format is the \fB\.lz4\fR format\.
 .
 .SS "Difference between lz4 and gzip"
 \fBlz4\fR supports a command line syntax similar \fIbut not identical\fR to \fBgzip(1)\fR\. Differences are :
@@ -95,7 +95,7 @@ Compress\. This is the default operation mode when no operation mode option is s
 .
 .TP
 \fB\-d\fR \fB\-\-decompress\fR \fB\-\-uncompress\fR
-Decompress\. \fB\-\-decompress\fR is also the default operation when the input filename has an \fB\.lz4\fR extension\.
+Decompress\. \fB\-\-decompress\fR is also the default operation when the input filename has an \fB\.lz4\fR extension\. \fBlz4\fR can also decode Firefox\'s \fBmozlz4\fR files (\fB\.jsonlz4\fR, \fB\.mozlz4\fR), for example \fBlz4cat sessionstore\.jsonlz4\fR\.
 .
 .TP
 \fB\-t\fR \fB\-\-test\fR
@@ -113,11 +113,11 @@ List information about \.lz4 files\. For detailed information on files with mult
 .
 .TP
 \fB\-#\fR
-Compression level, with # being any value from 1 to 12\. Higher values trade compression speed for compression ratio\. Values above 12 are considered the same as 12\. Recommended values are 1 for fast compression (default), and 9 for high compression\. Speed/compression trade\-off will vary depending on data to compress\. Decompression speed remains fast at all settings\.
+Compression level, with # being any value from 1 to 12\. Higher values trade compression speed for better compression ratio\. Values above 12 are considered the same as 12\. Recommended values are 1 for fast compression (default), and 9 for high compression\. Speed/compression trade\-off will vary depending on data to compress\. Decompression speed remains fast at all settings\.
 .
 .TP
 \fB\-\-fast[=#]\fR
-Switch to ultra\-fast compression levels\. The higher the value, the faster the compression speed, at the cost of some compression ratio\. If \fB=#\fR is not present, it defaults to \fB1\fR\. This setting overrides compression level if one was set previously\. Similarly, if a compression level is set after \fB\-\-fast\fR, it overrides it\.
+Switch to ultra\-fast compression levels\. The higher the value, the faster the compression speed, but at the cost of compressed size\. If \fB=#\fR is not present, it defaults to \fB1\fR\. Values above \fB65536\fR make no difference\. This setting overrides compression level if one was set previously\. Similarly, if a compression level is set after \fB\-\-fast\fR, it overrides it\.
 .
 .TP
 \fB\-\-best\fR
@@ -125,11 +125,19 @@ Set highest compression level\. Same as \-12\.
 .
 .TP
 \fB\-T#\fR, \fB\-\-threads=#\fR
-Use \fB#\fR threads for compression\. When \fB0\fR, or none provided: automatically determined from nb of detected cores\.
+Use \fB#\fR worker threads for compression\. The main thread reads and writes files meanwhile\. When \fB0\fR, or none provided: automatically determined from nb of detected cores\. In both cases, within memory budget (see \fB\-\-memory\fR), with a warning when it reduces \fB#\fR, and no more threads than the jobs of each file (1 MB, or a single block when larger)\. At most 1024 threads (128 on 32\-bit systems)\. Ignored with a custom block size (see \fB\-B#\fR)\. Compressed output doesn't depend on \fB#\fR, nor on multithreading support\.
+.
+.TP
+\fB\-\-single\-thread\fR
+Compress frames with the main thread alone, without cutting them into jobs (liblz4's single\-threaded mode)\. Different from \fB\-T1\fR, which compresses jobs within one worker thread, while the main thread reads and writes files : with linked blocks (\fB\-BD\fR), compressed output can differ slightly\.
+.
+.TP
+\fB\-\-memory=#\fR
+Memory budget of multi\-threaded compression, in bytes, with optional suffixes \fBK\fR, \fBM\fR, \fBG\fR (powers of 1024) (default: 4 GB, 1 GB on 32\-bit systems)\. It limits the number of worker threads\. Each worker employs ~20 MB with 4 MB blocks (default), ~5 MB with smaller blocks\.
 .
 .TP
 \fB\-\-favor\-decSpeed\fR
-Generate compressed data optimized for decompression speed\. Compressed data will be larger as a consequence (typically by ~0\.5%), while decompression speed will be improved by 5\-20%, depending on use cases\. This option only works in combination with very high compression levels (>=10)\.
+Generate compressed data optimized for decompression speed\. Compressed data will be larger as a consequence (typically by ~1%), while decompression speed will be improved by 5\-20%, depending on use cases\. This option only works in combination with very high compression levels (>=10)\.
 .
 .TP
 \fB\-D dictionaryName\fR
@@ -155,7 +163,7 @@ Multiple input files\. Compressed file names will be appended a \fB\.lz4\fR suff
 .
 .TP
 \fB\-r\fR
-operate recursively on directories\. This mode also sets \fB\-m\fR (multiple input files)\.
+operate recursively on directories\. This mode also sets \fB\-m\fR (multiple input files)\. Symbolic links to directories found within them are not followed\.
 .
 .TP
 \fB\-B#\fR
@@ -163,6 +171,9 @@ Block size [4\-7](default : 7)
 .
 .br
 \fB\-B4\fR= 64KB ; \fB\-B5\fR= 256KB ; \fB\-B6\fR= 1MB ; \fB\-B7\fR= 4MB
+.
+.br
+\fB\-B#\fR with \fB#\fR >= 32 : block size in bytes\. Sizes other than 64KB, 256KB, 1MB and 4MB are compressed single\-threaded (\fB\-T#\fR is ignored)\.
 .
 .TP
 \fB\-BI\fR
@@ -196,6 +207,16 @@ Note : this option can only be activated when the original size can be determine
 Sparse mode support (default:enabled on file, disabled on stdout)
 .
 .TP
+\fB\-\-[no\-]mmap\fR
+Memory\-map regular files to compress, so that compression threads read them in place (default:enabled when supported)
+.
+.br
+Note : a file truncated while being compressed, or an I/O error while reading it, then interrupts \fBlz4\fR with error 53 (instead of compressing the content read up to that point) ; use \fB\-\-no\-mmap\fR when sources may be truncated or rewritten concurrently\.
+.
+.br
+Note : a source file modified while being compressed (size or times changed), or renamed or replaced (ex: log rotation), is detected after its compression, and is kept, even with \fB\-\-rm\fR\. When the output is valid, \fBlz4\fR only issues a warning : with \fB\-\-no\-mmap\fR, input is read once, so the output holds the content read (ex: up to the end of a log file growing meanwhile) ; memory\-mapped input is read several times, so its content is compared with the frame checksum (ex: log file growing meanwhile : the output holds the file as it was when opened)\. Otherwise (content rewritten, \fB\-\-no\-frame\-crc\fR, or file shrunk), the output could be inconsistent : \fBlz4\fR reports error 54 and removes it\.
+.
+.TP
 \fB\-l\fR
 Use Legacy format (typically for Linux Kernel compression)
 .
@@ -218,7 +239,7 @@ Display help/long help and exit
 .
 .TP
 \fB\-V\fR \fB\-\-version\fR
-Display Version number and exit
+Display Version number and exit\. The version line also tells if compression is multithreaded (\fBmultithread\fR) or not (\fBsingle\-thread\fR)
 .
 .TP
 \fB\-k\fR \fB\-\-keep\fR
@@ -226,7 +247,7 @@ Preserve source files (default behavior)
 .
 .TP
 \fB\-\-rm\fR
-Delete source files on successful compression or decompression
+Delete source files on successful compression or decompression\. A source file modified, renamed or replaced during its compression is kept (see \fB\-\-[no\-]mmap\fR)\.
 .
 .TP
 \fB\-\-\fR
@@ -236,7 +257,7 @@ Treat all subsequent arguments as files
 .
 .TP
 \fB\-b#\fR
-Benchmark file(s), using # compression level
+Benchmark file(s), using # compression level\. Each file is compressed into a frame, as \fBlz4\fR would with the same options (\fB\-B#\fR, \fB\-BD\fR, \fB\-BX\fR, \fB\-\-content\-size\fR, \fB\-\-favor\-decSpeed\fR, \fB\-D\fR), except the content checksum, disabled unless \fB\-\-frame\-crc\fR\. With one compression thread (as \fB\-T1\fR), unless \fB\-T#\fR or \fB\-\-single\-thread\fR is provided\.
 .
 .TP
 \fB\-e#\fR
@@ -255,7 +276,11 @@ specify a default compression level that \fBlz4\fR employs for compression when 
 .
 .TP
 \fBLZ4_NBWORKERS\fR
-specify a default number of threads that \fBlz4\fR will employ for compression\. Executable default is generally \fB0\fR, which means auto\-determined based on local cpu\. This functionality is only relevant when \fBlz4\fR is compiled with multithreading support\. The maximum number of workers is capped at \fBLZ4_NBWORKERS_MAX\fR (\fB200\fR by default)\.
+specify a default number of threads that \fBlz4\fR will employ for compression\. Executable default is generally \fB0\fR, which means auto\-determined based on local cpu, within memory budget\. This functionality is only relevant when \fBlz4\fR is compiled with multithreading support\.
+.
+.TP
+\fBLZ4_MEMORY\fR
+specify a memory budget for multi\-threaded compression, same as \fB\-\-memory=#\fR\.
 .
 .SH "BUGS"
 Report bugs at: https://github\.com/lz4/lz4/issues

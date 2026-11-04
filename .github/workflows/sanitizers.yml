@@ -1,0 +1,116 @@
+# Sanitizer testing (AddressSanitizer, MemorySanitizer, etc.)
+name: Sanitizers
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+
+jobs:
+  ubsan-x64:
+    name: UndefinedBehaviorSanitizer (x64)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Run UBSan tests
+      run: make ubsan V=1
+
+  ubsan-x86:
+    name: UndefinedBehaviorSanitizer (x86)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Install 32-bit dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install gcc-multilib lib32gcc-11-dev
+
+    - name: Run UBSan tests (32-bit)
+      run: |
+        make clean
+        CC=clang make V=1 usan32
+
+  asan-x64:
+    name: AddressSanitizer (x64)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Setup memory mapping
+      run: sudo sysctl -w vm.mmap_min_addr=4096
+
+    - name: ASan - basic check
+      run: |
+        make clean
+        CFLAGS=-fsanitize=address LDFLAGS=-fsanitize=address make -j check V=1
+
+    - name: ASan - frame test
+      run: |
+        make clean
+        CFLAGS=-fsanitize=address LDFLAGS=-fsanitize=address make -j -C tests test-frametest test-unittest V=1
+
+    - name: ASan - multi-threaded frame compression
+      run: |
+        make clean
+        CFLAGS=-fsanitize=address LDFLAGS=-fsanitize=address make -j -C tests test-frameMT-quick V=1
+
+    - name: ASan - fuzzer test
+      run: |
+        make clean
+        CFLAGS=-fsanitize=address LDFLAGS=-fsanitize=address make -j -C tests test-fuzzer V=1
+
+  msan-x64:
+    name: MemorySanitizer (x64)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: MSan - basic check
+      run: |
+        make clean
+        CC=clang CFLAGS=-fsanitize=memory LDFLAGS=-fsanitize=memory make -j check V=1
+
+    - name: MSan - frame test
+      run: |
+        make clean
+        CC=clang CFLAGS=-fsanitize=memory LDFLAGS=-fsanitize=memory make -j -C tests test-frametest test-unittest V=1
+
+    - name: MSan - multi-threaded frame compression
+      # build with multi-threading support only : the build without it runs the same code serially
+      run: |
+        make clean
+        CC=clang CFLAGS=-fsanitize=memory LDFLAGS=-fsanitize=memory make -j -C tests frameMT V=1
+        cd tests && ./frameMT -q
+
+    - name: MSan - fuzzer test
+      run: |
+        make clean
+        CC=clang CFLAGS=-fsanitize=memory LDFLAGS=-fsanitize=memory make -j -C tests test-fuzzer V=1
+
+  tsan-x64:
+    name: ThreadSanitizer (x64)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: TSan - CLI test
+      run: |
+        make clean
+        CC=clang CPPFLAGS="-fsanitize=thread" make -j -C tests test-lz4 V=1
+
+    - name: TSan - multi-threaded frame compression
+      run: |
+        make clean
+        CC=clang CPPFLAGS="-fsanitize=thread" make -j -C tests test-frameMT-quick V=1

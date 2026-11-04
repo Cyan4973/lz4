@@ -1,6 +1,6 @@
 /*
   threadpool.h - part of lz4 project
-  Copyright (C) Yann Collet 2023
+  Copyright (c) Yann Collet. All rights reserved.
   GPL v2 License
 
   This program is free software; you can redistribute it and/or modify
@@ -58,6 +58,26 @@ void TPool_submitJob(TPool* ctx, void (*job_function)(void*), void* arg);
  *  Blocks until all queued jobs are completed.
  */
 void TPool_jobsCompleted(TPool* ctx);
+
+/*! TPool_setJobError() :
+ *  For a job : records an error (the first one is kept) instead of exiting,
+ *  which would race with the other jobs (ex: on output streams).
+ *  The main thread exits with it once all jobs are completed : see TPool_jobError().
+ */
+void TPool_setJobError(int error);
+
+/*! TPool_jobError() :
+ *  @return the first error recorded by a job, or 0.
+ */
+int TPool_jobError(void);
+
+/*! TPool_allJobsAwaited() :
+ *  @return 1 if all jobs submitted to any pool were awaited by TPool_jobsCompleted(),
+ *  0 otherwise, notably from within a job.
+ *  The process must only exit when it returns 1 :
+ *  otherwise, exit() races with the other threads (ex: on output streams).
+ */
+int TPool_allJobsAwaited(void);
 
 
 

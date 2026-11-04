@@ -3,6 +3,10 @@
 datagen
 frametest
 frametest32
+frameMT
+frameMT-nomt
+unittest
+unittest-mt
 fullbench
 fullbench32
 fullbench-lib
@@ -10,11 +14,8 @@ fullbench-dll
 fuzzer
 fuzzer32
 fasttest
-roundTripTest
 checkTag
 checkFrame
-decompress-partial
-decompress-partial-usingDict
 abiTest
 freestanding
 

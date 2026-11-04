@@ -20,7 +20,7 @@ DESCRIPTION
 
 `lz4` is a CLI based on `liblz4`, an extremely fast implementation of lossless compression algorithm.
 It provides a default compression speed of typically > 500 MB/s per core.
-Speed can traded for higher compression ratio, by increasing the compression level parameter.
+Speed can be traded for better compression ratio, by increasing the compression level parameter.
 While decompression is single-threaded, it reaches multiple GB/s, generally fast enough to be I/O bound.
 `lz4` native file format is the `.lz4` format.
 
@@ -102,6 +102,8 @@ only the latest one will be applied.
   Decompress.
   `--decompress` is also the default operation when the input filename has an
   `.lz4` extension.
+  `lz4` can also decode Firefox's `mozlz4` files (`.jsonlz4`, `.mozlz4`),
+  for example `lz4cat sessionstore.jsonlz4`.
 
 * `-t` `--test`:
   Test the integrity of compressed `.lz4` files.
@@ -120,7 +122,7 @@ only the latest one will be applied.
 
 * `-#`:
   Compression level, with # being any value from 1 to 12.
-  Higher values trade compression speed for compression ratio.
+  Higher values trade compression speed for better compression ratio.
   Values above 12 are considered the same as 12.
   Recommended values are 1 for fast compression (default),
   and 9 for high compression.
@@ -129,8 +131,9 @@ only the latest one will be applied.
 
 * `--fast[=#]`:
   Switch to ultra-fast compression levels.
-  The higher the value, the faster the compression speed, at the cost of some compression ratio.
+  The higher the value, the faster the compression speed, but at the cost of compressed size.
   If `=#` is not present, it defaults to `1`.
+  Values above `65536` make no difference.
   This setting overrides compression level if one was set previously.
   Similarly, if a compression level is set after `--fast`, it overrides it.
 
@@ -138,12 +141,28 @@ only the latest one will be applied.
   Set highest compression level. Same as -12.
 
 * `-T#`, `--threads=#`:
-  Use `#` threads for compression.
+  Use `#` worker threads for compression.
+  The main thread reads and writes files meanwhile.
   When `0`, or none provided: automatically determined from nb of detected cores.
+  In both cases, within memory budget (see `--memory`), with a warning when it reduces `#`,
+  and no more threads than the jobs of each file (1 MB, or a single block when larger).
+  At most 1024 threads (128 on 32-bit systems).
+  Ignored with a custom block size (see `-B#`).
+  Compressed output doesn't depend on `#`, nor on multithreading support.
+
+* `--single-thread`:
+  Compress frames with the main thread alone, without cutting them into jobs (liblz4's single-threaded mode).
+  Different from `-T1`, which compresses jobs within one worker thread, while the main thread reads and writes files :
+  with linked blocks (`-BD`), compressed output can differ slightly.
+
+* `--memory=#`:
+  Memory budget of multi-threaded compression, in bytes, with optional suffixes `K`, `M`, `G` (powers of 1024)
+  (default: 4 GB, 1 GB on 32-bit systems). It limits the number of worker threads.
+  Each worker employs ~20 MB with 4 MB blocks (default), ~5 MB with smaller blocks.
 
 * `--favor-decSpeed`:
   Generate compressed data optimized for decompression speed.
-  Compressed data will be larger as a consequence (typically by ~0.5%),
+  Compressed data will be larger as a consequence (typically by ~1%),
   while decompression speed will be improved by 5-20%, depending on use cases.
   This option only works in combination with very high compression levels (>=10).
 
@@ -177,10 +196,13 @@ only the latest one will be applied.
 * `-r` :
   operate recursively on directories.
   This mode also sets `-m` (multiple input files).
+  Symbolic links to directories found within them are not followed.
 
 * `-B#`:
   Block size \[4-7\](default : 7)<br/>
-  `-B4`= 64KB ; `-B5`= 256KB ; `-B6`= 1MB ; `-B7`= 4MB
+  `-B4`= 64KB ; `-B5`= 256KB ; `-B6`= 1MB ; `-B7`= 4MB<br/>
+  `-B#` with `#` >= 32 : block size in bytes.
+  Sizes other than 64KB, 256KB, 1MB and 4MB are compressed single-threaded (`-T#` is ignored).
 
 * `-BI`:
   Produce independent blocks (default)
@@ -206,6 +228,20 @@ only the latest one will be applied.
 * `--[no-]sparse`:
   Sparse mode support (default:enabled on file, disabled on stdout)
 
+* `--[no-]mmap`:
+  Memory-map regular files to compress, so that compression threads read them in place
+  (default:enabled when supported)<br/>
+  Note : a file truncated while being compressed, or an I/O error while reading it,
+  then interrupts `lz4` with error 53 (instead of compressing the content read up to that point) ;
+  use `--no-mmap` when sources may be truncated or rewritten concurrently.<br/>
+  Note : a source file modified while being compressed (size or times changed), or renamed or replaced (ex: log rotation),
+  is detected after its compression, and is kept, even with `--rm`. When the output is valid, `lz4` only issues a warning :
+  with `--no-mmap`, input is read once, so the output holds the content read (ex: up to the end of a log file growing meanwhile) ;
+  memory-mapped input is read several times, so its content is compared with the frame checksum
+  (ex: log file growing meanwhile : the output holds the file as it was when opened).
+  Otherwise (content rewritten, `--no-frame-crc`, or file shrunk), the output could be inconsistent :
+  `lz4` reports error 54 and removes it.
+
 * `-l`:
   Use Legacy format (typically for Linux Kernel compression)<br/>
   Note : `-l` is not compatible with `-m` (`--multiple`) nor `-r`
@@ -223,13 +259,15 @@ only the latest one will be applied.
   Display help/long help and exit
 
 * `-V` `--version`:
-  Display Version number and exit
+  Display Version number and exit.
+  The version line also tells if compression is multithreaded (`multithread`) or not (`single-thread`)
 
 * `-k` `--keep`:
   Preserve source files (default behavior)
 
 * `--rm` :
-  Delete source files on successful compression or decompression
+  Delete source files on successful compression or decompression.
+  A source file modified, renamed or replaced during its compression is kept (see `--[no-]mmap`).
 
 * `--` :
   Treat all subsequent arguments as files
@@ -238,7 +276,11 @@ only the latest one will be applied.
 ### Benchmark mode
 
 * `-b#`:
-  Benchmark file(s), using # compression level
+  Benchmark file(s), using # compression level.
+  Each file is compressed into a frame, as `lz4` would with the same options
+  (`-B#`, `-BD`, `-BX`, `--content-size`, `--favor-decSpeed`, `-D`),
+  except the content checksum, disabled unless `--frame-crc`.
+  With one compression thread (as `-T1`), unless `-T#` or `--single-thread` is provided.
 
 * `-e#`:
   Benchmark multiple compression levels, from b# to e# (included)
@@ -258,7 +300,10 @@ When set as global environment variables, it can be a way to enforce personalize
   specify a default compression level that `lz4` employs for compression when no other compression level is specified on command line. Executable default is generally `1`.
 
 * `LZ4_NBWORKERS`:
-  specify a default number of threads that `lz4` will employ for compression. Executable default is generally `0`, which means auto-determined based on local cpu. This functionality is only relevant when `lz4` is compiled with multithreading support. The maximum number of workers is capped at `LZ4_NBWORKERS_MAX` (`200` by default).
+  specify a default number of threads that `lz4` will employ for compression. Executable default is generally `0`, which means auto-determined based on local cpu, within memory budget. This functionality is only relevant when `lz4` is compiled with multithreading support.
+
+* `LZ4_MEMORY`:
+  specify a memory budget for multi-threaded compression, same as `--memory=#`.
 
 
 BUGS

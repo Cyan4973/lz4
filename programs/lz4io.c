@@ -1,6 +1,6 @@
 /*
   LZ4io.c - LZ4 File/Stream Interface
-  Copyright (C) Yann Collet 2011-2024
+  Copyright (c) Yann Collet. All rights reserved.
 
   GPL v2 License
 
@@ -37,6 +37,9 @@
 #ifdef _MSC_VER    /* Visual Studio */
 #  pragma warning(disable : 4127)    /* disable: C4127: conditional expression is constant */
 #endif
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#  define _DEFAULT_SOURCE          /* madvise(), MADV_* : see LZ4IO_releaseInput() */
+#endif
 #if defined(__MINGW32__) && !defined(_POSIX_SOURCE)
 #  define _POSIX_SOURCE 1          /* disable %llu warnings with MinGW on Windows */
 #endif
@@ -56,11 +59,31 @@
 #include <sys/stat.h>  /* stat64 */
 #include "lz4conf.h"   /* compile-time constants */
 #include "lz4io.h"
+#include "threadpool.h" /* TPool_* */
+#define LZ4_STATIC_LINKING_ONLY  /* LZ4_ACCELERATION_MAX */
 #include "lz4.h"       /* required for legacy format */
 #include "lz4hc.h"     /* required for legacy format */
 #define LZ4F_STATIC_LINKING_ONLY
 #include "lz4frame.h"  /* LZ4F_* */
-#include "xxhash.h"    /* frame checksum (MT mode) */
+#include "xxhash.h"    /* XXH32 : content checksum of a memory-mapped source */
+
+/* memory-mapped input (see LZ4IO_setMmap()) : POSIX 64-bit systems */
+#ifndef LZ4IO_MMAP_SUPPORT
+#  if (PLATFORM_POSIX_VERSION >= 1) && defined(__64BIT__)
+#    define LZ4IO_MMAP_SUPPORT 1
+#  else
+#    define LZ4IO_MMAP_SUPPORT 0
+#  endif
+#endif
+#if LZ4IO_MMAP_SUPPORT
+#  include <sys/mman.h>  /* mmap, munmap, madvise */
+#  include <signal.h>    /* sigaction, SIGBUS */
+#  include <unistd.h>    /* write, _exit */
+#endif
+#if PLATFORM_POSIX_VERSION >= 1
+#  include <fcntl.h>     /* open, O_* */
+#  include <unistd.h>    /* close */
+#endif
 
 
 /*****************************
@@ -81,6 +104,8 @@
 #define LZ4IO_SKIPPABLE0    0x184D2A50
 #define LZ4IO_SKIPPABLEMASK 0xFFFFFFF0
 #define LEGACY_MAGICNUMBER  0x184C2102
+#define MOZLZ4_MAGIC        "mozLz40"   /* Firefox format, see LZ4IO_decodeMozLZ4() */
+#define MOZLZ4_MAGIC_SIZE   sizeof(MOZLZ4_MAGIC)   /* 8 bytes, including the terminating '\0' */
 
 #define CACHELINE 64
 #define LEGACY_BLOCKSIZE   (8 MB)
@@ -90,6 +115,8 @@
 
 #undef MIN
 #define MIN(a,b)  ((a)<(b)?(a):(b))
+#undef MAX
+#define MAX(a,b)  ((a)>(b)?(a):(b))
 
 /**************************************
 *  Time and Display
@@ -109,21 +136,31 @@ static int g_displayLevel = 0;   /* 0 : no display  ; 1: errors  ; 2 : + result 
 static const Duration_ns refreshRate = 200000000;
 static TIME_t g_time = { 0 };
 
-static double cpuLoad_sec(clock_t cpuStart)
+/* Gives the cpu time,
+ * i.e. the sum of kernel time + user time spent in all active threads since the beginning of the program.
+ * When compared with time duration, it gives a sense of cpu load.
+ * On Windows: uses GetProcessTimes() counters.
+ * On posix: relies on the fact that `clock()` measures cpu time.
+ */
+static double cpuTime_sec(void)
 {
 #ifdef _WIN32
     FILETIME creationTime, exitTime, kernelTime, userTime;
-    (void)cpuStart;
     GetProcessTimes(GetCurrentProcess(), &creationTime, &exitTime, &kernelTime, &userTime);
-    assert(kernelTime.dwHighDateTime == 0);
-    assert(userTime.dwHighDateTime == 0);
-    return ((double)kernelTime.dwLowDateTime + (double)userTime.dwLowDateTime) * 100. / 1000000000.;
+    return ( ((double)kernelTime.dwLowDateTime + (double)userTime.dwLowDateTime)
+           + ((double)kernelTime.dwHighDateTime + (double)userTime.dwHighDateTime) * (double)(1ULL << 32) )
+           * 100. / 1000000000.;
 #else
-    return (double)(clock() - cpuStart) / CLOCKS_PER_SEC;
+    return (double)clock() / (double)CLOCKS_PER_SEC;
 #endif
 }
 
-static void LZ4IO_finalTimeDisplay(TIME_t timeStart, clock_t cpuStart, unsigned long long size)
+static double cpuTimeSpan_sec(double startTime)
+{
+    return cpuTime_sec() - startTime;
+}
+
+static void LZ4IO_finalTimeDisplay(TIME_t timeStart, double cpuTimeStart, unsigned long long size)
 {
 #if LZ4IO_MULTITHREAD
     if (!TIME_support_MT_measurements()) {
@@ -131,9 +168,9 @@ static void LZ4IO_finalTimeDisplay(TIME_t timeStart, clock_t cpuStart, unsigned 
     } else
 #endif
     {
-        Duration_ns duration_ns = TIME_clockSpan_ns(timeStart);
+        Duration_ns const duration_ns = TIME_clockSpan_ns(timeStart);
         double const seconds = (double)(duration_ns + !duration_ns) / (double)1000000000.;
-        double const cpuLoad_s = cpuLoad_sec(cpuStart);
+        double const cpuLoad_s = cpuTimeSpan_sec(cpuTimeStart);
         DISPLAYLEVEL(3,"Done in %.2f s ==> %.2f MiB/s  (cpu load : %.0f%%)\n", seconds,
                         (double)size / seconds / 1024. / 1024.,
                         (cpuLoad_s / seconds) * 100.);
@@ -154,7 +191,21 @@ static void LZ4IO_finalTimeDisplay(TIME_t timeStart, clock_t cpuStart, unsigned 
     DISPLAYLEVEL(1, __VA_ARGS__);                                 \
     DISPLAYLEVEL(1, " \n");                                       \
     fflush(NULL);                                                 \
+    assert(TPool_allJobsAwaited());  /* no job running */         \
     exit(error);                                                  \
+}
+/* JOB_ERROR() : error met within a job, see TPool_setJobError() */
+#define JOB_ERROR(error, ...)                                     \
+{                                                                 \
+    DISPLAYLEVEL(1, "Error %i : ", error);                        \
+    DISPLAYLEVEL(1, __VA_ARGS__);                                 \
+    DISPLAYLEVEL(1, " \n");                                       \
+    TPool_setJobError(error);                                     \
+}
+#define END_PROCESS_OR_JOB_ERROR(fromJob, error, ...)             \
+{                                                                 \
+    if (fromJob) JOB_ERROR(error, __VA_ARGS__)                    \
+    else END_PROCESS(error, __VA_ARGS__)                          \
 }
 
 #define LZ4IO_STATIC_ASSERT(c)   { enum { LZ4IO_static_assert = 1/(int)(!!(c)) }; }   /* use after variable declarations */
@@ -163,6 +214,16 @@ static void LZ4IO_finalTimeDisplay(TIME_t timeStart, clock_t cpuStart, unsigned 
 /* ************************************************** */
 /* ****************** Init functions ******************** */
 /* ************************************************** */
+
+/* nb of worker threads, for frame and legacy formats : capped as within liblz4 (LZ4F_getMaxNbWorkers()) ;
+ * 1 when liblz4 doesn't support multi-threading (see lz4 -V) */
+static int LZ4IO_capNbWorkers(int nbWorkers)
+{
+    unsigned const libMax = LZ4F_getMaxNbWorkers();
+    unsigned const maxWorkers = libMax ? libMax : 1;
+    if (nbWorkers < 1) return 1;
+    return ((unsigned)nbWorkers > maxWorkers) ? (int)maxWorkers : nbWorkers;
+}
 
 int LZ4IO_defaultNbWorkers(void)
 {
@@ -196,6 +257,10 @@ struct LZ4IO_prefs_s {
     const char* dictionaryFilename;
     int removeSrcFile;
     int nbWorkers;
+    int autoWorkers;   /* nbWorkers determined automatically (otherwise : requested, -T#) */
+    int singleThread;  /* frames compressed in liblz4's single-threaded mode (nbWorkers == 0) */
+    U64 memoryBudget;  /* 0 : default (LZ4IO_MEMORY_BUDGET) */
+    int useMmap;
 };
 
 void LZ4IO_freePreferences(LZ4IO_prefs_t* prefs)
@@ -210,8 +275,7 @@ LZ4IO_prefs_t* LZ4IO_defaultPreferences(void)
     prefs->passThrough = 0;
     prefs->overwrite = 1;
     prefs->testMode = 0;
-    prefs->blockSizeId = LZ4IO_BLOCKSIZEID_DEFAULT;
-    prefs->blockSize = 0;
+    LZ4IO_setBlockSizeID(prefs, LZ4IO_BLOCKSIZEID_DEFAULT);
     prefs->blockChecksum = 0;
     prefs->streamChecksum = 1;
     prefs->blockIndependence = 1;
@@ -221,16 +285,32 @@ LZ4IO_prefs_t* LZ4IO_defaultPreferences(void)
     prefs->favorDecSpeed = 0;
     prefs->dictionaryFilename = NULL;
     prefs->removeSrcFile = 0;
-    prefs->nbWorkers = LZ4IO_defaultNbWorkers();
+    prefs->nbWorkers = LZ4IO_capNbWorkers(LZ4IO_defaultNbWorkers());
+    prefs->autoWorkers = 1;
+    prefs->singleThread = 0;
+    prefs->memoryBudget = 0;
+    prefs->useMmap = 1;
     return prefs;
 }
 
 int LZ4IO_setNbWorkers(LZ4IO_prefs_t* const prefs, int nbWorkers)
 {
-    if (nbWorkers < 1 ) nbWorkers = 1;
-    nbWorkers = MIN(nbWorkers, LZ4_NBWORKERS_MAX);
-    prefs->nbWorkers = nbWorkers;
-    return nbWorkers;
+    prefs->autoWorkers = (nbWorkers == 0);
+    if (nbWorkers == 0) nbWorkers = LZ4IO_defaultNbWorkers();
+    prefs->nbWorkers = LZ4IO_capNbWorkers(nbWorkers);
+    return prefs->nbWorkers;
+}
+
+int LZ4IO_setSingleThread(LZ4IO_prefs_t* const prefs, int enable)
+{
+    prefs->singleThread = (enable != 0);
+    return prefs->singleThread;
+}
+
+unsigned long long LZ4IO_setMemoryBudget(LZ4IO_prefs_t* const prefs, unsigned long long budget)
+{
+    prefs->memoryBudget = budget;
+    return budget;
 }
 
 int LZ4IO_setDictionaryFilename(LZ4IO_prefs_t* const prefs, const char* dictionaryFilename)
@@ -325,6 +405,13 @@ int LZ4IO_setSparseFile(LZ4IO_prefs_t* const prefs, int enable)
     return prefs->sparseFileSupport;
 }
 
+/* Default setting : 1 (enabled, when supported) */
+int LZ4IO_setMmap(LZ4IO_prefs_t* const prefs, int enable)
+{
+    prefs->useMmap = (enable != 0);
+    return prefs->useMmap;
+}
+
 /* Default setting : 0 (disabled) */
 int LZ4IO_setContentSize(LZ4IO_prefs_t* const prefs, int enable)
 {
@@ -363,6 +450,17 @@ static int LZ4IO_isStdout(const char* s)
     return UTIL_sameString(s, stdoutmark);
 }
 
+/* LZ4IO_mustRemoveSrcFile() :
+ * `--rm` only applies to a regular source file :
+ * not in test mode, which removes nothing (see lz4.1.md),
+ * and not when reading from stdin, which is not a file. */
+static int LZ4IO_mustRemoveSrcFile(const LZ4IO_prefs_t* prefs, const char* srcFileName)
+{
+    return prefs->removeSrcFile
+        && !prefs->testMode
+        && !LZ4IO_isStdin(srcFileName);
+}
+
 
 /* ************************************************************************ **
 ** ********************** LZ4 File / Pipe compression ********************* **
@@ -397,12 +495,28 @@ static FILE* LZ4IO_openSrcFile(const char* srcFileName)
     return f;
 }
 
+/* @return : 1 if @dstFileName designates the file @srcFileName (same name, link, ...) :
+ *           opening it for writing would truncate the source before it is read */
+static int LZ4IO_isSameFile(const char* srcFileName, const char* dstFileName)
+{
+#if defined(_WIN32)
+    return UTIL_sameString(srcFileName, dstFileName);   /* no inode numbers */
+#else
+    stat_t srcStat, dstStat;
+    return UTIL_getFileStat(srcFileName, &srcStat)
+        && UTIL_getFileStat(dstFileName, &dstStat)
+        && (srcStat.st_dev == dstStat.st_dev) && (srcStat.st_ino == dstStat.st_ino);
+#endif
+}
+
 /** FIO_openDstFile() :
  *  prefs is writable, because sparseFileSupport might be updated.
  *  condition : `dstFileName` must be non-NULL.
+ * @srcFileName : source whose attributes are copied once `dstFileName` is complete, or NULL
+ *                it can't be the destination itself : it would be truncated
  * @result : FILE* to `dstFileName`, or NULL if it fails */
 static FILE*
-LZ4IO_openDstFile(const char* dstFileName, const LZ4IO_prefs_t* const prefs)
+LZ4IO_openDstFile(const char* dstFileName, const LZ4IO_prefs_t* const prefs, const char* srcFileName)
 {
     FILE* f;
     assert(dstFileName != NULL);
@@ -416,6 +530,10 @@ LZ4IO_openDstFile(const char* dstFileName, const LZ4IO_prefs_t* const prefs)
                             " to force-enable it, add --sparse command \n");
         }
     } else {
+        if (srcFileName != NULL && !LZ4IO_isStdin(srcFileName) && LZ4IO_isSameFile(srcFileName, dstFileName)) {
+            DISPLAYLEVEL(1, "%s: input and output are the same file; not overwritten \n", dstFileName);
+            return NULL;
+        }
         if (!prefs->overwrite && !LZ4IO_isDevNull(dstFileName)) {
             /* Check if destination file already exists */
             FILE* const testf = fopen( dstFileName, "rb" );
@@ -433,6 +551,15 @@ LZ4IO_openDstFile(const char* dstFileName, const LZ4IO_prefs_t* const prefs)
                     }
                     while ((ch!=EOF) && (ch!='\n')) ch = getchar();  /* flush rest of input line */
         }   }   }
+#if PLATFORM_POSIX_VERSION >= 1
+        /* a new file stays private until the source's permissions are copied, once it is complete */
+        if (srcFileName != NULL && !LZ4IO_isStdin(srcFileName) && !LZ4IO_isDevNull(dstFileName)
+          && UTIL_isRegFile(srcFileName)) {
+            int const fd = open(dstFileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+            f = (fd < 0) ? NULL : fdopen(fd, "wb");
+            if (f == NULL && fd >= 0) close(fd);
+        } else
+#endif
         f = fopen( dstFileName, "wb" );
         if (f==NULL) DISPLAYLEVEL(1, "%s: %s\n", dstFileName, strerror(errno));
     }
@@ -450,7 +577,17 @@ LZ4IO_openDstFile(const char* dstFileName, const LZ4IO_prefs_t* const prefs)
 *   MT I/O
 ***************************************/
 
-#include "threadpool.h"
+/* LZ4IO_waitJobs() :
+ * waits for all jobs of both pools, then exits with the first error met by a job, if any */
+static void LZ4IO_waitJobs(TPool* tPool, TPool* wPool)
+{
+    TPool_jobsCompleted(tPool);
+    TPool_jobsCompleted(wPool);
+    if (TPool_jobError()) {
+        fflush(NULL);
+        exit(TPool_jobError());
+    }
+}
 
 typedef struct {
     void* buf;
@@ -576,8 +713,9 @@ typedef struct {
 static void LZ4IO_writeBuffer(BufferDesc bufDesc, FILE* out)
 {
     size_t const size = bufDesc.size;
+    if (TPool_jobError()) return;   /* nothing more to write */
     if (fwrite(bufDesc.buf, 1, size, out) != size) {
-        END_PROCESS(38, "Write error : cannot write compressed block");
+        JOB_ERROR(38, "Write error : cannot write compressed block");
     }
 }
 
@@ -629,13 +767,11 @@ typedef size_t (*compress_f)(
     void* dst,
     size_t dstCapacity,
     const void* src,
-    size_t srcSize,
-    size_t prefixSize);
+    size_t srcSize);
 
 typedef struct {
     TPool* wpool;
     void* buffer;
-    size_t prefixSize;
     size_t inSize;
     unsigned long long blockNb;
     compress_f compress;
@@ -643,7 +779,6 @@ typedef struct {
     FILE* fout;
     WriteRegister* wr;
     size_t maxCBlockSize;
-    int lastBlock;
 } CompressJobDesc;
 
 static void LZ4IO_compressChunk(void* arg)
@@ -651,15 +786,18 @@ static void LZ4IO_compressChunk(void* arg)
     CompressJobDesc* const cjd = (CompressJobDesc*)arg;
     size_t const outCapacity = cjd->maxCBlockSize;
     void* const out_buff = malloc(outCapacity);
-    if (!out_buff)
-        END_PROCESS(33, "Allocation error : can't allocate output buffer to compress new chunk");
-    {   char* const inBuff = (char*)cjd->buffer + cjd->prefixSize;
-        size_t const cSize = cjd->compress(cjd->compressParameters, out_buff, outCapacity, inBuff, cjd->inSize, cjd->prefixSize);
+    if (!out_buff) {
+        JOB_ERROR(33, "Allocation error : can't allocate output buffer to compress new chunk");
+        return;
+    }
+    {   size_t const cSize = cjd->compress(cjd->compressParameters, out_buff, outCapacity, cjd->buffer, cjd->inSize);
 
         /* check for write */
         {   WriteJobDesc* const wjd = (WriteJobDesc*)malloc(sizeof(*wjd));
             if (wjd == NULL) {
-                END_PROCESS(35, "Allocation error : can't describe new write job");
+                JOB_ERROR(35, "Allocation error : can't describe new write job");
+                free(out_buff);
+                return;
             }
             wjd->cBuf = out_buff;
             wjd->cSize = (size_t)cSize;
@@ -673,7 +811,7 @@ static void LZ4IO_compressChunk(void* arg)
 static void LZ4IO_compressAndFreeChunk(void* arg)
 {
     CompressJobDesc* const cjd = (CompressJobDesc*)arg;
-    LZ4IO_compressChunk(arg);
+    if (!TPool_jobError()) LZ4IO_compressChunk(arg);
     /* clean up */
     free(cjd->buffer);
     free(cjd); /* because cjd is pod */
@@ -687,10 +825,8 @@ typedef struct {
     size_t chunkSize;
     unsigned long long totalReadSize;
     unsigned long long blockNb;
-    XXH32_state_t* xxh32;
     compress_f compress;
     const void* compressParameters;
-    void* prefix; /* if it exists, assumed to be filled with 64 KB */
     FILE* fout;
     WriteRegister* wr;
     size_t maxCBlockSize;
@@ -700,19 +836,16 @@ static void LZ4IO_readAndProcess(void* arg)
 {
     ReadTracker* const rjd = (ReadTracker*)arg;
     size_t const chunkSize = rjd->chunkSize;
-    size_t const prefixSize = (rjd->prefix != NULL) * 64 KB;
-    size_t const bufferSize = chunkSize + prefixSize;
-    void* const buffer = malloc(bufferSize);
-    if (!buffer)
-        END_PROCESS(31, "Allocation error : can't allocate buffer to read new chunk");
-    if (prefixSize) {
-        assert(prefixSize == 64 KB);
-        memcpy(buffer, rjd->prefix, prefixSize);
+    void* const buffer = malloc(chunkSize);
+    if (!buffer) {
+        JOB_ERROR(31, "Allocation error : can't allocate buffer to read new chunk");
+        return;
     }
-    {   char* const in_buff = (char*)buffer + prefixSize;
-        size_t const inSize = fread(in_buff, (size_t)1, chunkSize, rjd->fin);
+    {   size_t const inSize = fread(buffer, (size_t)1, chunkSize, rjd->fin);
         if (inSize > chunkSize) {
-            END_PROCESS(32, "Read error (read %u > %u [chunk size])", (unsigned)inSize, (unsigned)chunkSize);
+            JOB_ERROR(32, "Read error (read %u > %u [chunk size])", (unsigned)inSize, (unsigned)chunkSize);
+            free(buffer);
+            return;
         }
         rjd->totalReadSize += inSize;
         /* special case: nothing left: stop read operation */
@@ -723,18 +856,12 @@ static void LZ4IO_readAndProcess(void* arg)
         /* process read input */
         {   CompressJobDesc* const cjd = (CompressJobDesc*)malloc(sizeof(*cjd));
             if (cjd==NULL) {
-                END_PROCESS(33, "Allocation error : can't describe new compression job");
-            }
-            if (rjd->xxh32) {
-                XXH32_update(rjd->xxh32, in_buff, inSize);
-            }
-            if (rjd->prefix) {
-                /* dependent blocks mode */
-                memcpy(rjd->prefix, in_buff + inSize - 64 KB, 64 KB);
+                JOB_ERROR(33, "Allocation error : can't describe new compression job");
+                free(buffer);
+                return;
             }
             cjd->wpool = rjd->wpool;
             cjd->buffer = buffer; /* transfer ownership */
-            cjd->prefixSize = prefixSize;
             cjd->inSize = inSize;
             cjd->blockNb = rjd->blockNb;
             cjd->compress = rjd->compress;
@@ -742,9 +869,8 @@ static void LZ4IO_readAndProcess(void* arg)
             cjd->fout = rjd->fout;
             cjd->wr = rjd->wr;
             cjd->maxCBlockSize = rjd->maxCBlockSize;
-            cjd->lastBlock = inSize < chunkSize;
             TPool_submitJob(rjd->tPool, LZ4IO_compressAndFreeChunk, cjd);
-            if (inSize == chunkSize) {
+            if ((inSize == chunkSize) && !TPool_jobError()) {
                 /* likely more => read another chunk */
                 rjd->blockNb++;
                 TPool_submitJob(rjd->tPool, LZ4IO_readAndProcess, rjd);
@@ -775,22 +901,28 @@ typedef struct {
     int cLevel;
 } CompressLegacyState;
 
+/* same as LZ4F_levelToAcceleration() : capped at LZ4_ACCELERATION_MAX, without overflow */
+static int LZ4IO_levelToAcceleration(int cLevel)
+{
+    if (cLevel >= 0) return 1;
+    if (cLevel < 1 - LZ4_ACCELERATION_MAX) return LZ4_ACCELERATION_MAX;
+    return -cLevel + 1;
+}
+
 static size_t LZ4IO_compressBlockLegacy_fast(
     const void* params,
     void* dst,
     size_t dstCapacity,
     const void* src,
-    size_t srcSize,
-    size_t prefixSize
+    size_t srcSize
 )
 {
     const CompressLegacyState* const clevel = (const CompressLegacyState*)params;
-    int const acceleration = (clevel->cLevel < 0) ? -clevel->cLevel : 0;
+    int const acceleration = LZ4IO_levelToAcceleration(clevel->cLevel);
     int const cSize = LZ4_compress_fast((const char*)src, (char*)dst + LZ4IO_LEGACY_BLOCK_HEADER_SIZE, (int)srcSize, (int)dstCapacity, acceleration);
     if (cSize < 0)
         END_PROCESS(51, "fast compression failed");
     LZ4IO_writeLE32(dst, (unsigned)cSize);
-    assert(prefixSize == 0); (void)prefixSize;
     return (size_t) cSize + LZ4IO_LEGACY_BLOCK_HEADER_SIZE;
 }
 
@@ -799,8 +931,7 @@ static size_t LZ4IO_compressBlockLegacy_HC(
     void* dst,
     size_t dstCapacity,
     const void* src,
-    size_t srcSize,
-    size_t prefixSize
+    size_t srcSize
 )
 {
     const CompressLegacyState* const cs = (const CompressLegacyState*)params;
@@ -809,8 +940,107 @@ static size_t LZ4IO_compressBlockLegacy_HC(
     if (cSize < 0)
         END_PROCESS(52, "HC compression failed");
     LZ4IO_writeLE32(dst, (unsigned)cSize);
-    assert(prefixSize == 0); (void)prefixSize;
     return (size_t) cSize + LZ4IO_LEGACY_BLOCK_HEADER_SIZE;
+}
+
+/* A source file modified during its processing (compression or decompression) is detected by comparing
+ * its size and times before and after (like tar : "file changed as we read it").
+ * Input read once : the frame holds the content read, ex: a log file growing meanwhile (warning).
+ * Memory-mapped input is read several times : the frame is consistent only if the mapped content is unchanged
+ * (ex: file only grown), verified with the frame's content checksum (warning) ; otherwise, error. */
+typedef struct {
+    int valid;      /* regular file */
+    stat_t st;
+} LZ4IO_srcState_t;
+
+static LZ4IO_srcState_t LZ4IO_getSrcState(FILE* srcFile)
+{
+    LZ4IO_srcState_t s;
+    memset(&s, 0, sizeof(s));
+    s.valid = UTIL_getFDStat(UTIL_fileno(srcFile), &s.st);
+    return s;
+}
+
+static int LZ4IO_srcModified(const LZ4IO_srcState_t* before, FILE* srcFile)
+{
+    LZ4IO_srcState_t const after = LZ4IO_getSrcState(srcFile);
+    if (!before->valid) return 0;   /* not a regular file : can't tell */
+    if (!after.valid) return 1;
+    if ( (before->st.st_size != after.st.st_size)
+      || (before->st.st_mtime != after.st.st_mtime)
+      || (before->st.st_ctime != after.st.st_ctime) )
+        return 1;
+#if !defined(_WIN32) && (PLATFORM_POSIX_VERSION >= 200809L)
+    if ( (before->st.st_mtim.tv_nsec != after.st.st_mtim.tv_nsec)
+      || (before->st.st_ctim.tv_nsec != after.st.st_ctim.tv_nsec) )
+        return 1;
+#endif
+    return 0;
+}
+
+/* @return : 1 if @srcFileName doesn't designate the processed file anymore (ex: log rotation),
+ *           so that --rm would remove another file */
+static int LZ4IO_srcReplaced(const LZ4IO_srcState_t* s, const char* srcFileName)
+{
+#if defined(_WIN32)
+    /* no inode numbers, and st_dev differs between _stat() and _fstat() :
+     * but an open file can't be renamed nor removed there */
+    (void)s; (void)srcFileName;
+    return 0;
+#else
+    stat_t st;
+    if (!s->valid || LZ4IO_isStdin(srcFileName)) return 0;
+    if (!UTIL_getFileStat(srcFileName, &st)) return 1;   /* removed, or not a regular file anymore */
+    return (st.st_dev != s->st.st_dev) || (st.st_ino != s->st.st_ino);
+#endif
+}
+
+/* LZ4IO_finishFile() :
+ * Ends the processing of a source file, compression or decompression, @srcFile being still open :
+ * - the output is closed, or only flushed when shared (@dstShared : stdout, or /dev/null for several inputs) :
+ *   some write errors are only reported then ;
+ * - if processing succeeded (@success), the output gets the owner, permissions and modification time of the source,
+ *   and the source is removed with --rm : this happens only once the output is complete.
+ * A source renamed or replaced during processing gives no attributes, and is kept, as is a source modified meanwhile :
+ * --rm would remove another file, or content missing from the output. */
+static void
+LZ4IO_finishFile(FILE* srcFile, const LZ4IO_srcState_t* srcState,
+                 FILE* dstFile, int dstShared,
+                 const char* srcFileName, const char* dstFileName,
+                 int success, const LZ4IO_prefs_t* io_prefs)
+{
+    int const srcModified = LZ4IO_srcModified(srcState, srcFile);
+    int const srcReplaced = LZ4IO_srcReplaced(srcState, srcFileName);
+    int const writeError = dstShared ? fflush(dstFile) : fclose(dstFile);
+    fclose(srcFile);
+    if (!success) return;   /* source kept */
+    if (writeError) END_PROCESS(49, "Write error : cannot write %s", dstFileName);
+
+    if (srcModified || srcReplaced)   /* --rm not honored : also displayed in modes lowering notifications (stdout, multiple files) */
+        DISPLAYLEVEL((io_prefs->removeSrcFile ? 1 : 2), "\rWarning : %s : file %s during processing : output holds the content read%s \n",
+                        srcFileName, srcReplaced ? "renamed or replaced" : "modified",
+                        io_prefs->removeSrcFile ? " ; source kept" : "");
+
+    /* Copy owner, file permissions and modification time */
+    if ( srcState->valid && !srcReplaced
+      && !LZ4IO_isStdin(srcFileName)
+      && !dstShared && !LZ4IO_isStdout(dstFileName) && !LZ4IO_isDevNull(dstFileName) ) {
+        stat_t statbuf = srcState->st;
+        UTIL_setFileStat(dstFileName, &statbuf);
+    }
+
+    if (LZ4IO_mustRemoveSrcFile(io_prefs, srcFileName) && !srcModified && !srcReplaced) {  /* --rm */
+        if (remove(srcFileName))
+            END_PROCESS(45, "Remove error : %s: %s", srcFileName, strerror(errno));
+    }
+}
+
+static void LZ4IO_displayCompressedFile(unsigned long long srcSize, unsigned long long cSize)
+{
+    DISPLAYLEVEL(2, "\r%79s\r", "");
+    DISPLAYLEVEL(2, "Compressed %llu bytes into %llu bytes ==> %.2f%%\n",
+                    srcSize, cSize,
+                    (double)cSize / (double)(srcSize + !srcSize /* avoid division by zero */ ) * 100.);
 }
 
 /* LZ4IO_compressLegacy_internal :
@@ -824,12 +1054,13 @@ static int LZ4IO_compressLegacy_internal(unsigned long long* readSize,
                                   const LZ4IO_prefs_t* prefs)
 {
     int clResult = 0;
-    compress_f const compressionFunction = (compressionlevel < 3) ? LZ4IO_compressBlockLegacy_fast : LZ4IO_compressBlockLegacy_HC;
+    compress_f const compressionFunction = (compressionlevel < LZ4HC_CLEVEL_MIN) ? LZ4IO_compressBlockLegacy_fast : LZ4IO_compressBlockLegacy_HC;
     FILE* const finput = LZ4IO_openSrcFile(input_filename);
     FILE* foutput = NULL;
     TPool* const tPool = TPool_create(prefs->nbWorkers, 4);
     TPool* const wPool = TPool_create(1, 4);
     WriteRegister wr = WR_init(LEGACY_BLOCKSIZE);
+    LZ4IO_srcState_t srcState;
 
     /* Init & checks */
     *readSize = 0;
@@ -838,9 +1069,11 @@ static int LZ4IO_compressLegacy_internal(unsigned long long* readSize,
         clResult = 1;
         goto _cfl_clean;
     }
-    foutput = LZ4IO_openDstFile(output_filename, prefs);
+    srcState = LZ4IO_getSrcState(finput);
+    foutput = LZ4IO_openDstFile(output_filename, prefs, input_filename);
     if (foutput == NULL) {
         /* write file error : recoverable */
+        fclose(finput);
         clResult = 1;
         goto _cfl_clean;
     }
@@ -867,34 +1100,26 @@ static int LZ4IO_compressLegacy_internal(unsigned long long* readSize,
         rjd.chunkSize = LEGACY_BLOCKSIZE;
         rjd.totalReadSize = 0;
         rjd.blockNb = 0;
-        rjd.xxh32 = NULL;
         rjd.compress = compressionFunction;
         rjd.compressParameters = &cls;
-        rjd.prefix = NULL;
         rjd.fout = foutput;
         rjd.wr = &wr;
         rjd.maxCBlockSize = (size_t)LZ4_compressBound(LEGACY_BLOCKSIZE) + LZ4IO_LEGACY_BLOCK_HEADER_SIZE;
         /* Ignite the job chain */
         TPool_submitJob(tPool, LZ4IO_readAndProcess, &rjd);
-        /* Wait for all completion */
-        TPool_jobsCompleted(tPool);
-        TPool_jobsCompleted(wPool);
+        LZ4IO_waitJobs(tPool, wPool);
 
-        /* Status */
-        DISPLAYLEVEL(2, "\r%79s\r", "");    /* blank line */
-        DISPLAYLEVEL(2,"Compressed %llu bytes into %llu bytes ==> %.2f%% \n",
-                    rjd.totalReadSize, wr.totalCSize,
-                    (double)wr.totalCSize / (double)(rjd.totalReadSize + !rjd.totalReadSize) * 100.);
+        LZ4IO_finishFile(finput, &srcState, foutput, LZ4IO_isStdout(output_filename),
+                         input_filename, output_filename, 1, prefs);
+        LZ4IO_displayCompressedFile(rjd.totalReadSize, wr.totalCSize);
         *readSize = rjd.totalReadSize;
     }
 
-    /* Close & Free */
+    /* Free */
 _cfl_clean:
     WR_destroy(&wr);
     TPool_free(wPool);
     TPool_free(tPool);
-    if (finput) fclose(finput);
-    if (foutput && !LZ4IO_isStdout(output_filename)) fclose(foutput);  /* do not close stdout */
 
     return clResult;
 }
@@ -910,14 +1135,43 @@ int LZ4IO_compressFilename_Legacy(const char* input_filename,
                                   const LZ4IO_prefs_t* prefs)
 {
     TIME_t const timeStart = TIME_getTime();
-    clock_t const cpuStart = clock();
+    double const cpuStart = cpuTime_sec();
     unsigned long long processed = 0;
     int r = LZ4IO_compressLegacy_internal(&processed, input_filename, output_filename, compressionlevel, prefs);
     LZ4IO_finalTimeDisplay(timeStart, cpuStart, processed);
     return r;
 }
 
-#define FNSPACE 30
+/* LZ4IO_reserveFileName() :
+ * ensures that *bufferPtr can store a file name of @nameLength characters
+ * @return : *bufferPtr, or NULL if allocation fails */
+static char* LZ4IO_reserveFileName(char** bufferPtr, size_t* capacityPtr, size_t nameLength)
+{
+    if (*capacityPtr <= nameLength) {
+        free(*bufferPtr);
+        *capacityPtr = nameLength + 20;
+        *bufferPtr = (char*)malloc(*capacityPtr);
+        if (*bufferPtr == NULL) *capacityPtr = 0;
+    }
+    return *bufferPtr;
+}
+
+/* LZ4IO_compressedFileName() :
+ * @return : name of the compressed file : @srcFileName followed by @suffix,
+ *           or stdoutmark when @suffix is stdout,
+ *           or NULL if allocation fails */
+static const char*
+LZ4IO_compressedFileName(char** bufferPtr, size_t* capacityPtr, const char* srcFileName, const char* suffix)
+{
+    size_t const srcLength = strlen(srcFileName);
+    size_t const suffixLength = strlen(suffix);
+    if (LZ4IO_isStdout(suffix)) return stdoutmark;
+    if (LZ4IO_reserveFileName(bufferPtr, capacityPtr, srcLength + suffixLength) == NULL) return NULL;
+    memcpy(*bufferPtr, srcFileName, srcLength);
+    memcpy(*bufferPtr + srcLength, suffix, suffixLength + 1);
+    return *bufferPtr;
+}
+
 /* LZ4IO_compressMultipleFilenames_Legacy :
  * This function is intentionally "hidden" (not published in .h)
  * It generates multiple compressed streams using the old 'legacy' format */
@@ -927,38 +1181,18 @@ int LZ4IO_compressMultipleFilenames_Legacy(
                             int compressionLevel, const LZ4IO_prefs_t* prefs)
 {
     TIME_t const timeStart = TIME_getTime();
-    clock_t const cpuStart = clock();
+    double const cpuStart = cpuTime_sec();
     unsigned long long totalProcessed = 0;
     int i;
     int missed_files = 0;
-    char* dstFileName = (char*)malloc(FNSPACE);
-    size_t ofnSize = FNSPACE;
-    const size_t suffixSize = strlen(suffix);
-
-    if (dstFileName == NULL) return ifntSize;   /* not enough memory */
+    char* nameBuffer = NULL;
+    size_t nameCapacity = 0;
 
     /* loop on each file */
     for (i=0; i<ifntSize; i++) {
         unsigned long long processed = 0;
-        size_t const ifnSize = strlen(inFileNamesTable[i]);
-        if (LZ4IO_isStdout(suffix)) {
-            missed_files += LZ4IO_compressLegacy_internal(&processed,
-                                    inFileNamesTable[i], stdoutmark,
-                                    compressionLevel, prefs);
-            totalProcessed += processed;
-            continue;
-        }
-
-        if (ofnSize <= ifnSize+suffixSize+1) {
-            free(dstFileName);
-            ofnSize = ifnSize + 20;
-            dstFileName = (char*)malloc(ofnSize);
-            if (dstFileName==NULL) {
-                return ifntSize;
-        }   }
-        strcpy(dstFileName, inFileNamesTable[i]);
-        strcat(dstFileName, suffix);
-
+        const char* const dstFileName = LZ4IO_compressedFileName(&nameBuffer, &nameCapacity, inFileNamesTable[i], suffix);
+        if (dstFileName == NULL) return ifntSize;   /* not enough memory */
         missed_files += LZ4IO_compressLegacy_internal(&processed,
                                 inFileNamesTable[i], dstFileName,
                                 compressionLevel, prefs);
@@ -967,7 +1201,7 @@ int LZ4IO_compressMultipleFilenames_Legacy(
 
     /* Close & Free */
     LZ4IO_finalTimeDisplay(timeStart, cpuStart, totalProcessed);
-    free(dstFileName);
+    free(nameBuffer);
 
     return missed_files;
 }
@@ -983,15 +1217,11 @@ typedef struct {
     LZ4F_compressionContext_t ctx;
     LZ4F_preferences_t preparedPrefs;
     LZ4F_CDict* cdict;
-    TPool* tPool;
-    TPool* wPool; /* writer thread */
+    unsigned nbWorkers;   /* automatic nb of workers employed so far : only grows (see LZ4IO_compressFilename_extRess()) */
 } cRess_t;
 
 static void LZ4IO_freeCResources(cRess_t ress)
 {
-    TPool_free(ress.tPool);
-    TPool_free(ress.wPool);
-
     free(ress.srcBuffer);
     free(ress.dstBuffer);
 
@@ -1074,6 +1304,70 @@ static LZ4F_CDict* LZ4IO_createCDict(const LZ4IO_prefs_t* io_prefs)
     return cdict;
 }
 
+/* LZ4IO_customBlockSize() :
+ * @return 1 if blocks must be cut at a size different from LZ4F's standard ones */
+static int LZ4IO_customBlockSize(const LZ4IO_prefs_t* io_prefs)
+{
+    return io_prefs->blockSize != LZ4F_getBlockSize((LZ4F_blockSizeID_t)io_prefs->blockSizeId);
+}
+
+size_t LZ4IO_framePreferences(const LZ4IO_prefs_t* io_prefs, LZ4F_preferences_t* framePrefs)
+{
+    memset(framePrefs, 0, sizeof(*framePrefs));
+    framePrefs->frameInfo.blockMode = (LZ4F_blockMode_t)io_prefs->blockIndependence;
+    framePrefs->frameInfo.blockSizeID = (LZ4F_blockSizeID_t)io_prefs->blockSizeId;
+    framePrefs->frameInfo.blockChecksumFlag = (LZ4F_blockChecksum_t)io_prefs->blockChecksum;
+    framePrefs->frameInfo.contentChecksumFlag = (LZ4F_contentChecksum_t)io_prefs->streamChecksum;
+    framePrefs->frameInfo.contentSize = (unsigned long long)(io_prefs->contentSizeFlag != 0);
+    framePrefs->favorDecSpeed = io_prefs->favorDecSpeed;
+    if (!LZ4IO_customBlockSize(io_prefs)) return 0;
+    framePrefs->autoFlush = 1;
+    return io_prefs->blockSize;
+}
+
+/* Memory budget of frame compression : limits the automatic nb of workers,
+ * and explicit ones on 32-bit systems, where address space is scarce */
+#ifndef LZ4IO_MEMORY_BUDGET
+#  define LZ4IO_MEMORY_BUDGET ((sizeof(size_t) < 8) ? ((U64)1 << 30) : ((U64)4 << 30))
+#endif
+
+/* size of liblz4 compression jobs (see LZ4F_mtJobSize()) : 1 MB, or a single block when larger */
+static size_t LZ4IO_jobSize(const LZ4F_preferences_t* prefs)
+{
+    size_t const bs = LZ4F_getBlockSize(prefs->frameInfo.blockSizeID);
+    size_t const blockSize = LZ4F_isError(bs) ? 4 MB : bs;
+    if (blockSize >= 1 MB) return blockSize;
+    return ((1 MB) / blockSize) * blockSize;
+}
+
+/* estimated memory of frame compression with @nbWorkers :
+ * liblz4's job slots, input buffers and LZ4 states, plus the CLI's own buffers */
+static U64 LZ4IO_compressionMemory(const LZ4F_preferences_t* prefs, unsigned nbWorkers, size_t srcBufferSize)
+{
+    LZ4F_preferences_t p = *prefs;
+    size_t const jobSize = LZ4IO_jobSize(prefs);
+    U64 const outCapacity = (U64)jobSize + (jobSize / (64 KB) + 1) * 8;   /* + block headers and checksums */
+    p.nbWorkers = nbWorkers;
+    return (2 * (U64)nbWorkers + 1) * outCapacity                 /* job slots */
+         + ((U64)nbWorkers + 1) * (64 KB + jobSize)               /* input buffers */
+         + ((U64)nbWorkers + 1) * (U64)LZ4_sizeofStateHC()        /* one LZ4 state per thread (worst case : HC) */
+         + LZ4F_compressBound(srcBufferSize, &p) + srcBufferSize; /* CLI buffers */
+}
+
+unsigned long long LZ4IO_defaultMemoryBudget(void) { return LZ4IO_MEMORY_BUDGET; }
+
+/* @return : largest nb of workers, up to @nbWorkers, within @budget (at least 1) */
+static unsigned LZ4IO_budgetNbWorkers(const LZ4F_preferences_t* prefs, unsigned nbWorkers, size_t srcBufferSize, U64 budget)
+{
+    unsigned lo = 1, hi = MAX(nbWorkers, 1);   /* memory grows with nbWorkers */
+    while (lo < hi) {
+        unsigned const mid = lo + (hi - lo + 1) / 2;
+        if (LZ4IO_compressionMemory(prefs, mid, srcBufferSize) <= budget) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
+}
+
 static cRess_t LZ4IO_createCResources(const LZ4IO_prefs_t* io_prefs)
 {
     const size_t chunkSize = 4 MB;
@@ -1081,12 +1375,45 @@ static cRess_t LZ4IO_createCResources(const LZ4IO_prefs_t* io_prefs)
     memset(&ress, 0, sizeof(ress));
 
     /* set compression advanced parameters */
-    ress.preparedPrefs.autoFlush = 1;
-    ress.preparedPrefs.frameInfo.blockMode = (LZ4F_blockMode_t)io_prefs->blockIndependence;
-    ress.preparedPrefs.frameInfo.blockSizeID = (LZ4F_blockSizeID_t)io_prefs->blockSizeId;
-    ress.preparedPrefs.frameInfo.blockChecksumFlag = (LZ4F_blockChecksum_t)io_prefs->blockChecksum;
-    ress.preparedPrefs.frameInfo.contentChecksumFlag = (LZ4F_contentChecksum_t)io_prefs->streamChecksum;
-    ress.preparedPrefs.favorDecSpeed = io_prefs->favorDecSpeed;
+    LZ4IO_framePreferences(io_prefs, &ress.preparedPrefs);
+    ress.preparedPrefs.frameInfo.contentSize = 0;   /* set for each file */
+    if (LZ4IO_customBlockSize(io_prefs)) {
+        /* LZ4F cuts blocks at standard sizes only :
+         * custom sizes require autoFlush, and one LZ4F_compressUpdate() invocation per block,
+         * so compression is single-threaded */
+#if LZ4IO_MULTITHREAD
+        DISPLAYLEVEL(3, "Note : custom block size (%u bytes) : single-threaded compression (-T# ignored) \n",
+                        (unsigned)io_prefs->blockSize);
+#endif
+    } else if (io_prefs->singleThread) {
+        DISPLAYLEVEL(3, "Single-threaded compression (frames not cut into jobs) \n");
+    } else {
+        /* frames are cut into jobs, compressed by liblz4's worker threads (when available) :
+         * output doesn't depend on nbWorkers, nor on multi-threading support */
+        unsigned const requested = (unsigned)io_prefs->nbWorkers;   /* >= 1, capped (LZ4IO_capNbWorkers()) */
+        U64 const budget = io_prefs->memoryBudget ? io_prefs->memoryBudget : LZ4IO_MEMORY_BUDGET;
+        unsigned const nbWorkers = LZ4IO_budgetNbWorkers(&ress.preparedPrefs, requested, chunkSize, budget);
+        if (nbWorkers < requested) {
+            if (io_prefs->autoWorkers) {
+                DISPLAYLEVEL(3, "Memory budget (%u MB) : %u threads instead of %u \n",
+                                (unsigned)(budget >> 20), nbWorkers, requested);
+            } else {   /* requested nb of threads (-T#) not honored */
+                DISPLAYLEVEL(2, "Warning : memory budget (%u MB) : %u threads instead of %u (see --memory) \n",
+                                (unsigned)(budget >> 20), nbWorkers, requested);
+        }   }
+        if (LZ4IO_compressionMemory(&ress.preparedPrefs, nbWorkers, chunkSize) > budget)
+            DISPLAYLEVEL(2, "Warning : memory budget (%u MB) too small : compression requires ~%u MB \n",
+                            (unsigned)(budget >> 20),
+                            (unsigned)(LZ4IO_compressionMemory(&ress.preparedPrefs, nbWorkers, chunkSize) >> 20));
+#if LZ4IO_MULTITHREAD
+        if (LZ4F_getMaxNbWorkers()) {
+            DISPLAYLEVEL(3, "Using up to %u threads for compression \n", nbWorkers);
+        } else {
+            DISPLAYLEVEL(3, "Note : liblz4 built without multithreading support : single-threaded compression \n");
+        }
+#endif
+        ress.preparedPrefs.nbWorkers = nbWorkers;
+    }
 
     /* Allocate compression state */
     {   LZ4F_errorCode_t const errorCode = LZ4F_createCompressionContext(&(ress.ctx), LZ4F_VERSION);
@@ -1098,316 +1425,215 @@ static cRess_t LZ4IO_createCResources(const LZ4IO_prefs_t* io_prefs)
     /* Allocate Buffers */
     ress.srcBuffer = malloc(chunkSize);
     ress.srcBufferSize = chunkSize;
-    ress.dstBufferSize = LZ4F_compressFrameBound(chunkSize, &ress.preparedPrefs);
+    assert(io_prefs->blockSize > 0);
+    /* single-block frames, or streaming by chunks (output can lag behind input) */
+    ress.dstBufferSize = MAX(LZ4F_compressFrameBound(io_prefs->blockSize, &ress.preparedPrefs),
+                             LZ4F_compressBound(chunkSize, &ress.preparedPrefs));
     ress.dstBuffer = malloc(ress.dstBufferSize);
     if (!ress.srcBuffer || !ress.dstBuffer)
         END_PROCESS(31, "Allocation error : can't allocate buffers");
 
     ress.cdict = LZ4IO_createCDict(io_prefs);
 
-    /* will be created it needed */
-    ress.tPool = NULL;
-    ress.wPool = NULL;
-
     return ress;
 }
 
+/* Input of frame compression : read by chunks into a buffer,
+ * or memory-mapped (regular files), so that compression jobs read it in place (LZ4F_srcStableUntilFlush) */
 typedef struct {
-    const LZ4F_preferences_t* prefs;
-    const LZ4F_CDict* cdict;
-} LZ4IO_CfcParameters;
+    FILE* file;
+    void* buffer;
+    char* map;          /* NULL : not memory-mapped */
+    size_t mapSize;
+    size_t pos;         /* consumed (memory-mapped input) */
+    size_t released;    /* memory-mapped input released (memory hint) */
+#if LZ4IO_MMAP_SUPPORT
+    struct sigaction prevBusAction;   /* restored once unmapped */
+#endif
+} LZ4IO_cInput_t;
 
-static size_t LZ4IO_compressFrameChunk(const void* params,
-                                    void* dst, size_t dstCapacity,
-                                    const void* src, size_t srcSize,
-                                    size_t prefixSize)
+#if LZ4IO_MMAP_SUPPORT
+/* Reading a memory-mapped file truncated meanwhile, or failing (I/O error), raises SIGBUS,
+ * in the thread accessing it (main thread, or liblz4 worker thread) :
+ * it's reported as an error, instead of a crash. */
+#  define LZ4IO_MMAP_ERROR 53
+static char g_mmapErrorMsg[512];
+static size_t g_mmapErrorMsgSize = 0;
+
+static volatile sig_atomic_t g_mmapFault = 0;
+
+/* several threads can fault simultaneously : only the first one reports */
+static int LZ4IO_firstMmapFault(void)
 {
-    const LZ4IO_CfcParameters* const cfcp = (const LZ4IO_CfcParameters*)params;
-    LZ4F_cctx* cctx = NULL;
-    {   LZ4F_errorCode_t const ccr = LZ4F_createCompressionContext(&cctx, LZ4F_VERSION);
-        if (cctx==NULL || LZ4F_isError(ccr))
-            END_PROCESS(51, "unable to create a LZ4F compression context");
+#  if defined(__GNUC__)
+    return __sync_lock_test_and_set(&g_mmapFault, 1) == 0;
+#  else
+    int const first = !g_mmapFault;   /* best effort : the message may be repeated */
+    g_mmapFault = 1;
+    return first;
+#  endif
+}
+
+static void LZ4IO_mmapFaultHandler(int sig)
+{
+    /* async-signal-safe functions only */
+    (void)sig;
+    if (!LZ4IO_firstMmapFault()) {
+        for (;;) pause();   /* the first faulting thread terminates the process */
     }
-    /* init state, and writes frame header, will be overwritten at next stage. */
-    if (prefixSize) {
-        size_t const whr = LZ4F_compressBegin_usingDict(cctx, dst, dstCapacity, (const char*)src - prefixSize, prefixSize, cfcp->prefs);
-        if (LZ4F_isError(whr))
-            END_PROCESS(52, "error initializing LZ4F compression context with prefix");
-        assert(prefixSize == 64 KB);
+    if (g_mmapErrorMsgSize) {
+        ssize_t const r = write(STDERR_FILENO, g_mmapErrorMsg, g_mmapErrorMsgSize);
+        (void)r;
+    }
+    _exit(LZ4IO_MMAP_ERROR);
+}
+#endif
+
+/* maps a regular file ; leaves @in unmapped otherwise, or on failure */
+static void LZ4IO_mapInput(LZ4IO_cInput_t* in, const char* srcFileName)
+{
+#if LZ4IO_MMAP_SUPPORT
+    int const fd = fileno(in->file);
+    struct stat st;
+    struct sigaction busAction;
+    void* map;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || (st.st_size <= 0)) return;
+    if ((unsigned long long)st.st_size > (size_t)-1) return;
+
+    /* message prepared beforehand : the handler can't format it */
+    {   int const n = snprintf(g_mmapErrorMsg, sizeof(g_mmapErrorMsg),
+                        "Error %i : %s : file truncated or unreadable during compression (memory-mapped) ; retry with --no-mmap \n",
+                        LZ4IO_MMAP_ERROR, srcFileName);
+        g_mmapErrorMsgSize = ((g_displayLevel >= 1) && (n > 0)) ? MIN((size_t)n, sizeof(g_mmapErrorMsg) - 1) : 0;
+    }
+    memset(&busAction, 0, sizeof(busAction));
+    busAction.sa_handler = LZ4IO_mmapFaultHandler;
+    sigemptyset(&busAction.sa_mask);
+    if (sigaction(SIGBUS, &busAction, &in->prevBusAction)) return;   /* no handler : no mapping */
+
+    map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED) {
+        (void)sigaction(SIGBUS, &in->prevBusAction, NULL);
+        return;
+    }
+#  ifdef MADV_SEQUENTIAL
+    (void)madvise(map, (size_t)st.st_size, MADV_SEQUENTIAL);
+#  endif
+    in->map = (char*)map;
+    in->mapSize = (size_t)st.st_size;
+#else
+    (void)in; (void)srcFileName;
+#endif
+}
+
+static void LZ4IO_unmapInput(LZ4IO_cInput_t* in)
+{
+#if LZ4IO_MMAP_SUPPORT
+    if (in->map) {
+        munmap(in->map, in->mapSize);
+        (void)sigaction(SIGBUS, &in->prevBusAction, NULL);
+    }
+#endif
+    in->map = NULL;
+}
+
+/* @return : nb of bytes available at *ptr, up to @size ; 0 means end of input */
+static size_t LZ4IO_readInput(LZ4IO_cInput_t* in, size_t size, const void** ptr)
+{
+    if (in->map) {
+        size_t const n = MIN(size, in->mapSize - in->pos);
+        *ptr = in->map + in->pos;
+        in->pos += n;
+        return n;
+    }
+    *ptr = in->buffer;
+    return fread(in->buffer, (size_t)1, size, in->file);
+}
+
+/* releases memory-mapped input more than @lag bytes behind :
+ * only a memory hint, since released pages are read again from the file if still needed (ex: by a job in flight) */
+static void LZ4IO_releaseInput(LZ4IO_cInput_t* in, size_t lag)
+{
+#if LZ4IO_MMAP_SUPPORT && defined(__linux__) && defined(MADV_DONTNEED)
+    if (in->map && (in->pos > lag)) {
+        size_t const end = ((in->pos - lag) / (1 MB)) * (1 MB);   /* page aligned */
+        if (end > in->released) {
+            (void)madvise(in->map + in->released, end - in->released, MADV_DONTNEED);
+            in->released = end;
+        }
+    }
+#else
+    (void)in; (void)lag;
+#endif
+}
+
+/* @return : 1 if the mapped content still matches the frame's content checksum (stored in its last 4 bytes),
+ *           0 if it differs, or can't be verified (no checksum, or file shrunk : mapped content can't be read) */
+static int LZ4IO_mappedContentUnchanged(const LZ4IO_cInput_t* in, FILE* srcFile,
+                                        int contentChecksum, const void* frameEnd)
+{
+    stat_t st;
+    if (!contentChecksum || (frameEnd == NULL)) return 0;
+    if (!UTIL_getFDStat(UTIL_fileno(srcFile), &st) || ((unsigned long long)st.st_size < in->mapSize)) return 0;
+    {   const unsigned char* const c = (const unsigned char*)frameEnd - 4;
+        unsigned const frameChecksum = (unsigned)c[0] | ((unsigned)c[1] << 8) | ((unsigned)c[2] << 16) | ((unsigned)c[3] << 24);
+        return XXH32(in->map, in->mapSize, 0) == frameChecksum;
+    }
+}
+
+/* keeps the last 4 bytes of the frame (content checksum, see LZ4IO_mappedContentUnchanged()) */
+static void LZ4IO_keepFrameTail(unsigned char tail[4], const void* out, size_t size)
+{
+    const unsigned char* const o = (const unsigned char*)out;
+    if (size >= 4) {
+        memcpy(tail, o + size - 4, 4);
     } else {
-        size_t const whr = LZ4F_compressBegin_usingCDict(cctx, dst, dstCapacity, cfcp->cdict, cfcp->prefs);
-        if (LZ4F_isError(whr))
-            END_PROCESS(53, "error initializing LZ4F compression context");
-    }
-    /* let's now compress, overwriting unused header */
-    {   size_t const cSize = LZ4F_compressUpdate(cctx, dst, dstCapacity, src, srcSize, NULL);
-        if (LZ4F_isError(cSize))
-            END_PROCESS(55, "error compressing with LZ4F_compressUpdate");
-
-        LZ4F_freeCompressionContext(cctx);
-        return (size_t) cSize;
+        memmove(tail, tail + size, 4 - size);
+        memcpy(tail + 4 - size, o, size);
     }
 }
 
-/*
- * LZ4IO_compressFilename_extRess()
- * result : 0 : compression completed correctly
- *          1 : missing or pb opening srcFileName
- */
-int
-LZ4IO_compressFilename_extRess_MT(unsigned long long* inStreamSize,
-                               cRess_t* ress,
-                               const char* srcFileName, const char* dstFileName,
-                               int compressionLevel,
-                               const LZ4IO_prefs_t* const io_prefs)
+/* LZ4IO_compressFrame() :
+ * Compress @input into @dstFile as one frame.
+ * @return : compressed size, *srcSizePtr : size of input, and @frameTail : last 4 bytes of the frame */
+static unsigned long long
+LZ4IO_compressFrame(unsigned long long* srcSizePtr, unsigned char frameTail[4],
+                    const cRess_t* ress, LZ4IO_cInput_t* input, FILE* dstFile,
+                    const char* srcFileName, LZ4F_preferences_t prefs,
+                    const LZ4IO_prefs_t* const io_prefs)
 {
     unsigned long long filesize = 0;
     unsigned long long compressedfilesize = 0;
-    FILE* dstFile;
-    void* const srcBuffer = ress->srcBuffer;
-    void* const dstBuffer = ress->dstBuffer;
-    const size_t dstBufferSize = ress->dstBufferSize;
-    const size_t chunkSize = 4 MB;  /* each job should be "sufficiently large" */
-    size_t readSize;
-    LZ4F_compressionContext_t ctx = ress->ctx;   /* just a pointer */
-    LZ4F_preferences_t prefs;
-
-    /* Init */
-    FILE* const srcFile = LZ4IO_openSrcFile(srcFileName);
-    if (srcFile == NULL) return 1;
-    dstFile = LZ4IO_openDstFile(dstFileName, io_prefs);
-    if (dstFile == NULL) { fclose(srcFile); return 1; }
-
-    /* Adjust compression parameters */
-    prefs = ress->preparedPrefs;
-    prefs.compressionLevel = compressionLevel;
-    if (io_prefs->contentSizeFlag) {
-      U64 const fileSize = UTIL_getOpenFileSize(srcFile);
-      prefs.frameInfo.contentSize = fileSize;   /* == 0 if input == stdin */
-      if (fileSize==0)
-          DISPLAYLEVEL(3, "Warning : cannot determine input content size \n");
-    }
-
-    /* read first chunk */
-    assert(chunkSize <= ress->srcBufferSize);
-    readSize  = fread(srcBuffer, (size_t)1, chunkSize, srcFile);
-    if (ferror(srcFile))
-        END_PROCESS(40, "Error reading first chunk (%u bytes) of '%s' ", (unsigned)chunkSize, srcFileName);
-    filesize += readSize;
-
-    /* single-block file */
-    if (readSize < chunkSize) {
-        /* Compress in single pass */
-        size_t const cSize = LZ4F_compressFrame_usingCDict(ctx, dstBuffer, dstBufferSize, srcBuffer, readSize, ress->cdict, &prefs);
-        if (LZ4F_isError(cSize))
-            END_PROCESS(41, "Compression failed : %s", LZ4F_getErrorName(cSize));
-        compressedfilesize = cSize;
-        DISPLAYUPDATE(2, "\rRead : %u MiB   ==> %.2f%%   ",
-                      (unsigned)(filesize>>20), (double)compressedfilesize/(double)(filesize+!filesize)*100);   /* avoid division by zero */
-
-        /* Write Block */
-        if (fwrite(dstBuffer, 1, cSize, dstFile) != cSize) {
-            END_PROCESS(42, "Write error : failed writing single-block compressed frame");
-    }   }
-
-    else
-
-    /* multiple-blocks file */
-    {   WriteRegister wr = WR_init(chunkSize);
-        void* prefixBuffer = NULL;
-
-        int checksum = (int)prefs.frameInfo.contentChecksumFlag;
-        XXH32_state_t* xxh32 = NULL;
-
-        LZ4IO_CfcParameters cfcp;
-        ReadTracker rjd;
-
-        if (ress->tPool == NULL) {
-            ress->tPool = TPool_create(io_prefs->nbWorkers, 4);
-            assert(ress->wPool == NULL);
-            ress->wPool = TPool_create(1, 4);
-            if (ress->tPool == NULL || ress->wPool == NULL)
-                END_PROCESS(43, "can't create threadpools");
-        }
-        cfcp.prefs = &prefs;
-        cfcp.cdict = ress->cdict;
-        rjd.tPool = ress->tPool;
-        rjd.wpool = ress->wPool;
-        rjd.fin = srcFile;
-        rjd.chunkSize = chunkSize;
-        rjd.totalReadSize = 0;
-        rjd.blockNb = 0;
-        rjd.xxh32 = xxh32;
-        rjd.compress = LZ4IO_compressFrameChunk;
-        rjd.compressParameters = &cfcp;
-        rjd.prefix = NULL;
-        rjd.fout = dstFile;
-        rjd.wr = &wr;
-        rjd.maxCBlockSize = LZ4F_compressFrameBound(chunkSize, &prefs);
-
-        /* process frame checksum externally */
-        if (checksum) {
-            xxh32 = XXH32_createState();
-            if (xxh32==NULL)
-                END_PROCESS(42, "could not init checksum");
-            XXH32_reset(xxh32, 0);
-            XXH32_update(xxh32, srcBuffer, readSize);
-            rjd.xxh32 = xxh32;
-        }
-
-        /* block dependency */
-        if (prefs.frameInfo.blockMode == LZ4F_blockLinked) {
-            prefixBuffer = malloc(64 KB);
-            if (prefixBuffer==NULL)
-                END_PROCESS(43, "cannot allocate small dictionary buffer");
-            rjd.prefix = prefixBuffer;
-        }
-
-        /* Write Frame Header */
-        /* note: simplification: do not employ dictionary when input size >= 4 MB,
-         * the benefit is very limited anyway, and is not worth the dependency cost */
-        {   size_t const headerSize = LZ4F_compressBegin(ctx, dstBuffer, dstBufferSize, &prefs);
-            if (LZ4F_isError(headerSize))
-                END_PROCESS(44, "File header generation failed : %s", LZ4F_getErrorName(headerSize));
-            if (fwrite(dstBuffer, 1, headerSize, dstFile) != headerSize)
-                END_PROCESS(45, "Write error : cannot write header");
-            compressedfilesize = headerSize;
-        }
-        /* avoid duplicating effort to process content checksum (done externally) */
-        prefs.frameInfo.contentChecksumFlag = LZ4F_noContentChecksum;
-
-        /* process first block */
-        {   CompressJobDesc cjd;
-            cjd.wpool = ress->wPool;
-            cjd.buffer = srcBuffer;
-            cjd.prefixSize = 0;
-            cjd.inSize = readSize;
-            cjd.blockNb = 0;
-            cjd.compress = LZ4IO_compressFrameChunk;
-            cjd.compressParameters = &cfcp;
-            cjd.fout = dstFile;
-            cjd.wr = &wr;
-            cjd.maxCBlockSize = rjd.maxCBlockSize;
-            cjd.lastBlock = 0;
-            TPool_submitJob(ress->tPool, LZ4IO_compressChunk, &cjd);
-            rjd.totalReadSize = readSize;
-            rjd.blockNb = 1;
-            if (prefixBuffer) {
-                assert(readSize >= 64 KB);
-                memcpy(prefixBuffer, (char*)srcBuffer + readSize - 64 KB, 64 KB);
-            }
-
-            /* Start the job chain */
-            TPool_submitJob(ress->tPool, LZ4IO_readAndProcess, &rjd);
-
-            /* Wait for all completion */
-            TPool_jobsCompleted(ress->tPool);
-            TPool_jobsCompleted(ress->wPool);
-            compressedfilesize += wr.totalCSize;
-        }
-
-        /* End of Frame mark */
-        {   size_t endSize = 4;
-            assert(dstBufferSize >= 8);
-            memset(dstBuffer, 0, 4);
-            if (checksum) {
-                /* handle frame checksum externally
-                 * note: LZ4F_compressEnd already wrote a (bogus) checksum */
-                U32 const crc = XXH32_digest(xxh32);
-                LZ4IO_writeLE32( (char*)dstBuffer + 4, crc);
-                endSize = 8;
-            }
-            if (fwrite(dstBuffer, 1, endSize, dstFile) != endSize)
-                END_PROCESS(49, "Write error : cannot write end of frame");
-            compressedfilesize += endSize;
-            filesize = rjd.totalReadSize;
-        }
-
-        /* clean up*/
-        free(prefixBuffer);
-        XXH32_freeState(xxh32);
-        WR_destroy(&wr);
-    }
-
-    /* Release file handlers */
-    fclose (srcFile);
-    if (!LZ4IO_isStdout(dstFileName)) fclose(dstFile);  /* do not close stdout */
-
-    /* Copy owner, file permissions and modification time */
-    {   stat_t statbuf;
-        if (!LZ4IO_isStdin(srcFileName)
-         && !LZ4IO_isStdout(dstFileName)
-         && !LZ4IO_isDevNull(dstFileName)
-         && UTIL_getFileStat(srcFileName, &statbuf)) {
-            UTIL_setFileStat(dstFileName, &statbuf);
-    }   }
-
-    if (io_prefs->removeSrcFile) {  /* remove source file : --rm */
-        if (remove(srcFileName))
-            END_PROCESS(50, "Remove error : %s: %s", srcFileName, strerror(errno));
-    }
-
-    /* Final Status */
-    DISPLAYLEVEL(2, "\r%79s\r", "");
-    DISPLAYLEVEL(2, "Compressed %llu bytes into %llu bytes ==> %.2f%%\n",
-                    filesize, compressedfilesize,
-                    (double)compressedfilesize / (double)(filesize + !filesize /* avoid division by zero */ ) * 100.);
-    *inStreamSize = filesize;
-
-    return 0;
-}
-
-/*
- * LZ4IO_compressFilename_extRess()
- * result : 0 : compression completed correctly
- *          1 : missing or pb opening srcFileName
- */
-int
-LZ4IO_compressFilename_extRess_ST(unsigned long long* inStreamSize,
-                               const cRess_t* ress,
-                               const char* srcFileName, const char* dstFileName,
-                               int compressionLevel,
-                               const LZ4IO_prefs_t* const io_prefs)
-{
-    unsigned long long filesize = 0;
-    unsigned long long compressedfilesize = 0;
-    FILE* dstFile;
-    void* const srcBuffer = ress->srcBuffer;
     void* const dstBuffer = ress->dstBuffer;
     const size_t dstBufferSize = ress->dstBufferSize;
     const size_t blockSize = io_prefs->blockSize;
+    /* custom block sizes : one block per invocation (see LZ4IO_createCResources()) */
+    const size_t chunkSize = LZ4IO_customBlockSize(io_prefs) ? blockSize : ress->srcBufferSize;
+    /* memory-mapped input is released (only a memory hint) behind input still read by liblz4 :
+     * up to 2*nbWorkers+1 jobs in flight (see LZ4F_MT_NBSLOTS() in lz4frame.c), and the 64 KB of history before them */
+    size_t const releaseLag = (2 * (size_t)prefs.nbWorkers + 1) * LZ4IO_jobSize(&prefs) + 64 KB;
     size_t readSize;
     LZ4F_compressionContext_t ctx = ress->ctx;   /* just a pointer */
-    LZ4F_preferences_t prefs;
+    LZ4F_compressOptions_t cOpts;
+    const void* chunk;
 
-    /* Init */
-    FILE* const srcFile = LZ4IO_openSrcFile(srcFileName);
-    if (srcFile == NULL) return 1;
-    dstFile = LZ4IO_openDstFile(dstFileName, io_prefs);
-    if (dstFile == NULL) { fclose(srcFile); return 1; }
-    memset(&prefs, 0, sizeof(prefs));
+    memset(&cOpts, 0, sizeof(cOpts));
+    /* mapping remains until the end of frame : worker threads read it in place.
+     * Not in single-threaded mode, where output of linked blocks depends on stableSrc : same output as input read with fread() */
+    cOpts.stableSrc = (input->map && prefs.nbWorkers) ? LZ4F_srcStableUntilFlush : LZ4F_srcUnstable;
 
-    /* Adjust compression parameters */
-    prefs = ress->preparedPrefs;
-    prefs.compressionLevel = compressionLevel;
-    if (io_prefs->contentSizeFlag) {
-      U64 const fileSize = UTIL_getOpenFileSize(srcFile);
-      prefs.frameInfo.contentSize = fileSize;   /* == 0 if input == stdin */
-      if (fileSize==0)
-          DISPLAYLEVEL(3, "Warning : cannot determine input content size \n");
-    }
-
-    /* read first block */
-    readSize  = fread(srcBuffer, (size_t)1, blockSize, srcFile);
-    if (ferror(srcFile)) END_PROCESS(40, "Error reading %s ", srcFileName);
+    /* read first chunk */
+    readSize  = LZ4IO_readInput(input, chunkSize, &chunk);
+    if (ferror(input->file)) END_PROCESS(40, "Error reading %s ", srcFileName);
     filesize += readSize;
 
     /* single-block file */
     if (readSize < blockSize) {
         /* Compress in single pass */
-        size_t const cSize = LZ4F_compressFrame_usingCDict(ctx, dstBuffer, dstBufferSize, srcBuffer, readSize, ress->cdict, &prefs);
+        size_t const cSize = LZ4F_compressFrame_usingCDict(ctx, dstBuffer, dstBufferSize, chunk, readSize, ress->cdict, &prefs);
         if (LZ4F_isError(cSize))
             END_PROCESS(41, "Compression failed : %s", LZ4F_getErrorName(cSize));
+        LZ4IO_keepFrameTail(frameTail, dstBuffer, cSize);
         compressedfilesize = cSize;
         DISPLAYUPDATE(2, "\rRead : %u MiB   ==> %.2f%%   ",
                       (unsigned)(filesize>>20), (double)compressedfilesize/(double)(filesize+!filesize)*100);   /* avoid division by zero */
@@ -1429,9 +1655,9 @@ LZ4IO_compressFilename_extRess_ST(unsigned long long* inStreamSize,
             END_PROCESS(44, "Write error : cannot write header");
         compressedfilesize += headerSize;
 
-        /* Main Loop - one block at a time */
+        /* Main Loop - one chunk at a time */
         while (readSize>0) {
-            size_t const outSize = LZ4F_compressUpdate(ctx, dstBuffer, dstBufferSize, srcBuffer, readSize, NULL);
+            size_t const outSize = LZ4F_compressUpdate(ctx, dstBuffer, dstBufferSize, chunk, readSize, &cOpts);
             if (LZ4F_isError(outSize))
                 END_PROCESS(45, "Compression failed : %s", LZ4F_getErrorName(outSize));
             compressedfilesize += outSize;
@@ -1443,50 +1669,36 @@ LZ4IO_compressFilename_extRess_ST(unsigned long long* inStreamSize,
             if (fwrite(dstBuffer, 1, outSize, dstFile) != outSize)
                 END_PROCESS(46, "Write error : cannot write compressed block");
 
-            /* Read next block */
-            readSize  = fread(srcBuffer, (size_t)1, (size_t)blockSize, srcFile);
+            /* Read next chunk */
+            LZ4IO_releaseInput(input, releaseLag);
+            readSize  = LZ4IO_readInput(input, chunkSize, &chunk);
             filesize += readSize;
         }
-        if (ferror(srcFile)) END_PROCESS(47, "Error reading %s ", srcFileName);
+        if (ferror(input->file)) END_PROCESS(47, "Error reading %s ", srcFileName);
 
-        /* End of Frame mark */
-        {   size_t const endSize = LZ4F_compressEnd(ctx, dstBuffer, dstBufferSize, NULL);
-            if (LZ4F_isError(endSize))
-                END_PROCESS(48, "End of frame error : %s", LZ4F_getErrorName(endSize));
-            if (fwrite(dstBuffer, 1, endSize, dstFile) != endSize)
-                END_PROCESS(49, "Write error : cannot write end of frame");
-            compressedfilesize += endSize;
+        /* End of Frame : jobs in flight, then end mark and checksum, in several pieces when they fill dstBuffer */
+        {   size_t endSize;
+            do {
+                endSize = LZ4F_compressEnd(ctx, dstBuffer, dstBufferSize, NULL);
+                if (LZ4F_isError(endSize))
+                    END_PROCESS(48, "End of frame error : %s", LZ4F_getErrorName(endSize));
+                if (fwrite(dstBuffer, 1, endSize, dstFile) != endSize)
+                    END_PROCESS(49, "Write error : cannot write end of frame");
+                compressedfilesize += endSize;
+                LZ4IO_keepFrameTail(frameTail, dstBuffer, endSize);
+            } while (endSize == dstBufferSize);
         }
     }
 
-    /* Release file handlers */
-    fclose (srcFile);
-    if (!LZ4IO_isStdout(dstFileName)) fclose(dstFile);  /* do not close stdout */
-
-    /* Copy owner, file permissions and modification time */
-    {   stat_t statbuf;
-        if (!LZ4IO_isStdin(srcFileName)
-         && !LZ4IO_isStdout(dstFileName)
-         && !LZ4IO_isDevNull(dstFileName)
-         && UTIL_getFileStat(srcFileName, &statbuf)) {
-            UTIL_setFileStat(dstFileName, &statbuf);
-    }   }
-
-    if (io_prefs->removeSrcFile) {  /* remove source file : --rm */
-        if (remove(srcFileName))
-            END_PROCESS(50, "Remove error : %s: %s", srcFileName, strerror(errno));
-    }
-
-    /* Final Status */
-    DISPLAYLEVEL(2, "\r%79s\r", "");
-    DISPLAYLEVEL(2, "Compressed %llu bytes into %llu bytes ==> %.2f%%\n",
-                    filesize, compressedfilesize,
-                    (double)compressedfilesize / (double)(filesize + !filesize /* avoid division by zero */ ) * 100.);
-    *inStreamSize = filesize;
-
-    return 0;
+    *srcSizePtr = filesize;
+    return compressedfilesize;
 }
 
+/*
+ * LZ4IO_compressFilename_extRess()
+ * result : 0 : compression completed correctly
+ *          1 : missing or pb opening srcFileName
+ */
 static int
 LZ4IO_compressFilename_extRess(unsigned long long* inStreamSize,
                                cRess_t* ress,
@@ -1494,16 +1706,77 @@ LZ4IO_compressFilename_extRess(unsigned long long* inStreamSize,
                                int compressionLevel,
                                const LZ4IO_prefs_t* const io_prefs)
 {
-    if (LZ4IO_MULTITHREAD)
-        return LZ4IO_compressFilename_extRess_MT(inStreamSize, ress, srcFileName, dstFileName, compressionLevel, io_prefs);
-    /* Only single-thread available */
-    return LZ4IO_compressFilename_extRess_ST(inStreamSize, ress, srcFileName, dstFileName, compressionLevel, io_prefs);
+    unsigned long long srcSize, cSize;
+    LZ4F_preferences_t prefs;
+    LZ4IO_cInput_t input;
+    LZ4IO_srcState_t srcState;
+    unsigned char frameTail[4];    /* last bytes of the frame (content checksum) */
+    FILE* dstFile;
+    FILE* const srcFile = LZ4IO_openSrcFile(srcFileName);
+    *inStreamSize = 0;
+    if (srcFile == NULL) return 1;
+    srcState = LZ4IO_getSrcState(srcFile);
+    dstFile = LZ4IO_openDstFile(dstFileName, io_prefs, srcFileName);
+    if (dstFile == NULL) { fclose(srcFile); return 1; }
+
+    /* Input : memory-mapped when possible (frames cut into jobs only, so that output doesn't depend on it) */
+    memset(&input, 0, sizeof(input));
+    input.file = srcFile;
+    input.buffer = ress->srcBuffer;
+    if (io_prefs->useMmap && !LZ4IO_customBlockSize(io_prefs) && !LZ4IO_isStdin(srcFileName))
+        LZ4IO_mapInput(&input, srcFileName);
+
+    /* Adjust compression parameters */
+    prefs = ress->preparedPrefs;
+    prefs.compressionLevel = compressionLevel;
+    if (io_prefs->contentSizeFlag) {
+      U64 const fileSize = UTIL_getOpenFileSize(srcFile);
+      prefs.frameInfo.contentSize = fileSize;   /* == 0 if input == stdin */
+      if (fileSize==0)
+          DISPLAYLEVEL(3, "Warning : cannot determine input content size \n");
+    }
+    /* no more workers than the jobs of the file (output doesn't depend on nbWorkers),
+     * but never decreasing from one file to the next, so that worker threads and buffers are kept */
+    if (prefs.nbWorkers > 1) {
+        U64 const fileSize = UTIL_getOpenFileSize(srcFile);   /* 0 : unknown */
+        U64 const jobSize = LZ4IO_jobSize(&prefs);
+        U64 const nbJobs = MAX((fileSize + jobSize - 1) / jobSize, ress->nbWorkers);
+        if (fileSize) {
+            if (nbJobs < prefs.nbWorkers) prefs.nbWorkers = (unsigned)nbJobs;
+            ress->nbWorkers = prefs.nbWorkers;
+    }   }
+    /* with independent blocks, a file fitting into a single job is compressed by the calling thread,
+     * without job buffers : same output, and worker threads remain available for next files.
+     * Not with linked blocks : single-threaded output can then depend on stableSrc (memory-mapped input) */
+    if (prefs.nbWorkers && (prefs.frameInfo.blockMode == LZ4F_blockIndependent)) {
+        U64 const fileSize = UTIL_getOpenFileSize(srcFile);   /* 0 : unknown (ex: stdin) */
+        if (fileSize && (fileSize <= LZ4IO_jobSize(&prefs))) prefs.nbWorkers = 0;
+    }
+
+    cSize = LZ4IO_compressFrame(&srcSize, frameTail, ress, &input, dstFile, srcFileName, prefs, io_prefs);
+
+    /* memory-mapped input modified during compression : the frame may be inconsistent */
+    {   int const inconsistent = (input.map != NULL) && LZ4IO_srcModified(&srcState, srcFile)
+                && !LZ4IO_mappedContentUnchanged(&input, srcFile,
+                        prefs.frameInfo.contentChecksumFlag == LZ4F_contentChecksumEnabled, frameTail + 4);
+        LZ4IO_unmapInput(&input);
+        if (inconsistent) {   /* inconsistent output is removed */
+            fclose(srcFile);
+            if (!LZ4IO_isStdout(dstFileName)) fclose(dstFile);
+            if (!LZ4IO_isStdout(dstFileName) && !LZ4IO_isDevNull(dstFileName)) (void)remove(dstFileName);
+            END_PROCESS(54, "%s : file modified during compression (memory-mapped) : output removed ; see --no-mmap", srcFileName);
+    }   }
+
+    LZ4IO_finishFile(srcFile, &srcState, dstFile, LZ4IO_isStdout(dstFileName), srcFileName, dstFileName, 1, io_prefs);
+    LZ4IO_displayCompressedFile(srcSize, cSize);
+    *inStreamSize = srcSize;
+    return 0;
 }
 
 int LZ4IO_compressFilename(const char* srcFileName, const char* dstFileName, int compressionLevel, const LZ4IO_prefs_t* prefs)
 {
     TIME_t const timeStart = TIME_getTime();
-    clock_t const cpuStart = clock();
+    double const cpuStart = cpuTime_sec();
     cRess_t ress = LZ4IO_createCResources(prefs);
     unsigned long long processed;
 
@@ -1526,40 +1799,21 @@ int LZ4IO_compressMultipleFilenames(
 {
     int i;
     int missed_files = 0;
-    char* dstFileName = (char*)malloc(FNSPACE);
-    size_t ofnSize = FNSPACE;
-    const size_t suffixSize = strlen(suffix);
-    cRess_t ress;
+    char* nameBuffer = NULL;
+    size_t nameCapacity = 0;
+    cRess_t ress = LZ4IO_createCResources(prefs);
     unsigned long long totalProcessed = 0;
     TIME_t timeStart = TIME_getTime();
-    clock_t cpuStart = clock();
-
-    if (dstFileName == NULL) return ifntSize;   /* not enough memory */
-    ress = LZ4IO_createCResources(prefs);
+    double const cpuStart = cpuTime_sec();
 
     /* loop on each file */
     for (i=0; i<ifntSize; i++) {
         unsigned long long processed;
-        size_t const ifnSize = strlen(inFileNamesTable[i]);
-        if (LZ4IO_isStdout(suffix)) {
-            missed_files += LZ4IO_compressFilename_extRess(&processed, &ress,
-                                    inFileNamesTable[i], stdoutmark,
-                                    compressionLevel, prefs);
-            totalProcessed += processed;
-            continue;
+        const char* const dstFileName = LZ4IO_compressedFileName(&nameBuffer, &nameCapacity, inFileNamesTable[i], suffix);
+        if (dstFileName == NULL) {   /* not enough memory */
+            LZ4IO_freeCResources(ress);
+            return ifntSize;
         }
-        /* suffix != stdout => compress into a file => generate its name */
-        if (ofnSize <= ifnSize+suffixSize+1) {
-            free(dstFileName);
-            ofnSize = ifnSize + 20;
-            dstFileName = (char*)malloc(ofnSize);
-            if (dstFileName==NULL) {
-                LZ4IO_freeCResources(ress);
-                return ifntSize;
-        }   }
-        strcpy(dstFileName, inFileNamesTable[i]);
-        strcat(dstFileName, suffix);
-
         missed_files += LZ4IO_compressFilename_extRess(&processed, &ress,
                                 inFileNamesTable[i], dstFileName,
                                 compressionLevel, prefs);
@@ -1568,7 +1822,7 @@ int LZ4IO_compressMultipleFilenames(
 
     /* Close & Free */
     LZ4IO_freeCResources(ress);
-    free(dstFileName);
+    free(nameBuffer);
     LZ4IO_finalTimeDisplay(timeStart, cpuStart, totalProcessed);
 
     return missed_files;
@@ -1595,7 +1849,8 @@ static unsigned
 LZ4IO_fwriteSparse(FILE* file,
                    const void* buffer, size_t bufferSize,
                    int sparseFileSupport,
-                   unsigned storedSkips)
+                   unsigned storedSkips,
+                   int fromJob)
 {
     const size_t sizeT = sizeof(size_t);
     const size_t maskT = sizeT -1 ;
@@ -1608,14 +1863,14 @@ LZ4IO_fwriteSparse(FILE* file,
 
     if (!sparseMode) {  /* normal write */
         size_t const sizeCheck = fwrite(buffer, 1, bufferSize, file);
-        if (sizeCheck != bufferSize) END_PROCESS(70, "Write error : cannot write decoded block");
+        if (sizeCheck != bufferSize) END_PROCESS_OR_JOB_ERROR(fromJob, 70, "Write error : cannot write decoded block");
         return 0;
     }
 
     /* avoid int overflow */
     if (storedSkips > 1 GB) {
         int const seekResult = UTIL_fseek(file, 1 GB, SEEK_CUR);
-        if (seekResult != 0) END_PROCESS(71, "1 GB skip error (sparse file support)");
+        if (seekResult != 0) { END_PROCESS_OR_JOB_ERROR(fromJob, 71, "1 GB skip error (sparse file support)"); return 0; }
         storedSkips -= 1 GB;
     }
 
@@ -1632,13 +1887,13 @@ LZ4IO_fwriteSparse(FILE* file,
         if (nb0T != seg0SizeT) {   /* not all 0s */
             errno = 0;
             {   int const seekResult = UTIL_fseek(file, storedSkips, SEEK_CUR);
-                if (seekResult) END_PROCESS(72, "Sparse skip error(%d): %s ; try --no-sparse", (int)errno, strerror(errno));
+                if (seekResult) { END_PROCESS_OR_JOB_ERROR(fromJob, 72, "Sparse skip error(%d): %s ; try --no-sparse", (int)errno, strerror(errno)); return 0; }
             }
             storedSkips = 0;
             seg0SizeT -= nb0T;
             ptrT += nb0T;
             {   size_t const sizeCheck = fwrite(ptrT, sizeT, seg0SizeT, file);
-                if (sizeCheck != seg0SizeT) END_PROCESS(73, "Write error : cannot write decoded block");
+                if (sizeCheck != seg0SizeT) { END_PROCESS_OR_JOB_ERROR(fromJob, 73, "Write error : cannot write decoded block"); return 0; }
         }   }
         ptrT += seg0SizeT;
     }
@@ -1652,10 +1907,10 @@ LZ4IO_fwriteSparse(FILE* file,
         storedSkips += (unsigned) (restPtr - restStart);
         if (restPtr != restEnd) {
             int const seekResult = UTIL_fseek(file, storedSkips, SEEK_CUR);
-            if (seekResult) END_PROCESS(74, "Sparse skip error ; try --no-sparse");
+            if (seekResult) { END_PROCESS_OR_JOB_ERROR(fromJob, 74, "Sparse skip error ; try --no-sparse"); return 0; }
             storedSkips = 0;
             {   size_t const sizeCheck = fwrite(restPtr, 1, (size_t)(restEnd - restPtr), file);
-                if (sizeCheck != (size_t)(restEnd - restPtr)) END_PROCESS(75, "Write error : cannot write decoded end of block");
+                if (sizeCheck != (size_t)(restEnd - restPtr)) { END_PROCESS_OR_JOB_ERROR(fromJob, 75, "Write error : cannot write decoded end of block"); return 0; }
         }   }
     }
 
@@ -1684,7 +1939,7 @@ typedef struct {
     FILE* f;
     int sparseEnable;
     unsigned* storedSkips;
-    const unsigned long long* totalSize;
+    unsigned long long* totalSize;
 } ChunkToWrite;
 
 static void LZ4IO_writeDecodedChunk(void* arg)
@@ -1692,9 +1947,12 @@ static void LZ4IO_writeDecodedChunk(void* arg)
     ChunkToWrite* const ctw = (ChunkToWrite*)arg;
     assert(ctw != NULL);
 
-    /* note: works because only 1 thread */
-    *ctw->storedSkips = LZ4IO_fwriteSparse(ctw->f, ctw->buffer, ctw->size, ctw->sparseEnable, *ctw->storedSkips); /* success or die */
-    DISPLAYUPDATE(2, "\rDecompressed : %u MiB  ", (unsigned)(ctw->totalSize[0] >>20));
+    if (!TPool_jobError()) {   /* otherwise, nothing more to write */
+        /* note: works because only 1 thread */
+        *ctw->storedSkips = LZ4IO_fwriteSparse(ctw->f, ctw->buffer, ctw->size, ctw->sparseEnable, *ctw->storedSkips, 1);
+        *ctw->totalSize += (unsigned long long)ctw->size;
+        DISPLAYUPDATE(2, "\rDecompressed : %u MiB  ", (unsigned)(ctw->totalSize[0] >>20));
+    }
 
     /* clean up */
     free(ctw);
@@ -1716,14 +1974,20 @@ static void LZ4IO_decompressBlockLegacy(void* arg)
     int decodedSize;
     LegacyBlockInput* const lbi = (LegacyBlockInput*)arg;
 
+    if (TPool_jobError()) { free(lbi); return; }   /* stop decoding */
     decodedSize = LZ4_decompress_safe((const char*)lbi->inBuffer, (char*)lbi->outBuffer, (int)lbi->inSize, LEGACY_BLOCKSIZE);
-    if (decodedSize < 0) END_PROCESS(64, "Decoding Failed ! Corrupted input detected !");
-    *lbi->totalSize += (unsigned long long)decodedSize; /* note: works because only 1 thread */
+    if (decodedSize < 0) {
+        JOB_ERROR(64, "Decoding Failed ! Corrupted input detected !");
+        free(lbi);
+        return;
+    }
 
     /* push to write thread */
     {   ChunkToWrite* const ctw = (ChunkToWrite*)malloc(sizeof(*ctw));
         if (ctw==NULL) {
-            END_PROCESS(33, "Allocation error : can't describe new write job");
+            JOB_ERROR(33, "Allocation error : can't describe new write job");
+            free(lbi);
+            return;
         }
         ctw->buffer = lbi->outBuffer;
         ctw->size = (size_t)decodedSize;
@@ -1767,13 +2031,17 @@ LZ4IO_decodeLegacyStream(FILE* finput, FILE* foutput, const LZ4IO_prefs_t* prefs
         char header[LZ4IO_LEGACY_BLOCK_HEADER_SIZE];
         unsigned int blockSize;
 
+        if (TPool_jobError()) break;
+
         /* Block Size */
         {   size_t const sizeCheck = fread(header, 1, LZ4IO_LEGACY_BLOCK_HEADER_SIZE, finput);
             if (sizeCheck == 0) break;                   /* Nothing to read : file read is completed */
-            if (sizeCheck != LZ4IO_LEGACY_BLOCK_HEADER_SIZE)
+            if (sizeCheck != LZ4IO_LEGACY_BLOCK_HEADER_SIZE) {
+                LZ4IO_waitJobs(tPool, wPool);
                 END_PROCESS(61, "Error: cannot read block size in Legacy format");
-        }
+        }   }
         blockSize = LZ4IO_readLE32(header);       /* Convert to Little Endian */
+        if (blockSize == 0) break;                /* end marker (Linux kernel) */
         if (blockSize > LZ4_COMPRESSBOUND(LEGACY_BLOCKSIZE)) {
             /* Cannot read next block : maybe new stream ? */
             g_magicRead = blockSize;
@@ -1782,12 +2050,16 @@ LZ4IO_decodeLegacyStream(FILE* finput, FILE* foutput, const LZ4IO_prefs_t* prefs
 
         /* Read Block */
         {   size_t const sizeCheck = fread(inBuffs[bSetNb], 1, blockSize, finput);
-            if (sizeCheck != blockSize)
+            if (sizeCheck != blockSize) {
+                LZ4IO_waitJobs(tPool, wPool);
                 END_PROCESS(63, "Read error : cannot access compressed block !");
+            }
             /* push to decoding thread */
             {   LegacyBlockInput* const lbi = (LegacyBlockInput*)malloc(sizeof(*lbi));
-                if (lbi==NULL)
+                if (lbi==NULL) {
+                    LZ4IO_waitJobs(tPool, wPool);
                     END_PROCESS(64, "Allocation error : not enough memory to allocate job descriptor");
+                }
                 lbi->inBuffer = inBuffs[bSetNb];
                 lbi->inSize = blockSize;
                 lbi->outBuffer = outBuffs[bSetNb];
@@ -1800,11 +2072,8 @@ LZ4IO_decodeLegacyStream(FILE* finput, FILE* foutput, const LZ4IO_prefs_t* prefs
             }
         }
     }
+    LZ4IO_waitJobs(tPool, wPool);
     if (ferror(finput)) END_PROCESS(65, "Read error : ferror");
-
-    /* Wait for all completion */
-    TPool_jobsCompleted(tPool);
-    TPool_jobsCompleted(wPool);
 
     /* flush last zeroes */
     LZ4IO_fwriteSparseEnd(foutput, storedSkips);
@@ -1844,6 +2113,7 @@ LZ4IO_decodeLegacyStream(FILE* finput, FILE* foutput, const LZ4IO_prefs_t* prefs
                 END_PROCESS(62, "Error: cannot read block size in Legacy format");
         }
         blockSize = LZ4IO_readLE32(in_buff);       /* Convert to Little Endian */
+        if (blockSize == 0) break;                 /* end marker (Linux kernel) */
         if (blockSize > LZ4_COMPRESSBOUND(LEGACY_BLOCKSIZE)) {
             /* Cannot read next block : maybe new stream ? */
             g_magicRead = blockSize;
@@ -1859,7 +2129,7 @@ LZ4IO_decodeLegacyStream(FILE* finput, FILE* foutput, const LZ4IO_prefs_t* prefs
             if (decodeSize < 0) END_PROCESS(64, "Decoding Failed ! Corrupted input detected !");
             streamSize += (unsigned long long)decodeSize;
             /* Write Block */
-            storedSkips = LZ4IO_fwriteSparse(foutput, out_buff, (size_t)decodeSize, prefs->sparseFileSupport, storedSkips); /* success or die */
+            storedSkips = LZ4IO_fwriteSparse(foutput, out_buff, (size_t)decodeSize, prefs->sparseFileSupport, storedSkips, 0); /* success or die */
     }   }
     if (ferror(finput)) END_PROCESS(65, "Read error : ferror");
 
@@ -1872,6 +2142,48 @@ LZ4IO_decodeLegacyStream(FILE* finput, FILE* foutput, const LZ4IO_prefs_t* prefs
     return streamSize;
 }
 #endif
+
+/* mozlz4 : format of Firefox's .jsonlz4 and .mozlz4 files (decoding only).
+ * MOZLZ4_MAGIC, followed by the decompressed size (4 bytes, little endian),
+ * then a single LZ4 block, extending to the end of input.
+ * Like Firefox, the decompressed size is only used as decoding capacity. */
+static unsigned long long
+LZ4IO_decodeMozLZ4(FILE* finput, FILE* foutput, const LZ4IO_prefs_t* prefs)
+{
+    unsigned char sizeStore[4];
+    unsigned dstCapacity;
+    size_t srcCapacity, srcSize;
+    char* src;
+    char* dst;
+    int decodedSize;
+
+    if (fread(sizeStore, 1, sizeof(sizeStore), finput) != sizeof(sizeStore))
+        END_PROCESS(62, "Error: cannot read decompressed size in mozlz4 format");
+    dstCapacity = LZ4IO_readLE32(sizeStore);
+    if (dstCapacity > (unsigned)LZ4_MAX_INPUT_SIZE)   /* can't be compressed into a single block */
+        END_PROCESS(62, "Error: mozlz4 decompressed size too large (%u)", dstCapacity);
+    srcCapacity = (size_t)LZ4_COMPRESSBOUND(dstCapacity);   /* no valid block is larger */
+
+    src = (char*)malloc(srcCapacity);
+    dst = (char*)malloc(MAX(dstCapacity, 1));   /* malloc(0) may return NULL */
+    if (!src || !dst) END_PROCESS(61, "Allocation error : not enough memory");
+
+    srcSize = fread(src, 1, srcCapacity, finput);
+    if (ferror(finput)) END_PROCESS(65, "Read error : ferror");
+
+    if (srcSize == 0 && dstCapacity == 0)
+        decodedSize = 0;   /* empty content : Firefox writes no block */
+    else
+        decodedSize = LZ4_decompress_safe(src, dst, (int)srcSize, (int)dstCapacity);
+    if (decodedSize < 0) END_PROCESS(64, "Decoding Failed ! Corrupted input detected !");
+    {   unsigned const storedSkips = LZ4IO_fwriteSparse(foutput, dst, (size_t)decodedSize, prefs->sparseFileSupport, 0, 0); /* success or die */
+        LZ4IO_fwriteSparseEnd(foutput, storedSkips);
+    }
+
+    free(src);
+    free(dst);
+    return (unsigned long long)decodedSize;
+}
 
 
 typedef struct {
@@ -1949,8 +2261,8 @@ typedef struct {
 
 typedef struct {
     Buffer buffers[PBUFFERS_NB];
-    int availNext;
-    int usedIdx;
+    unsigned long long availNext;   /* monotonic : used modulo PBUFFERS_NB, must not signed-overflow */
+    unsigned long long usedIdx;
 } BufferPool;
 
 static void LZ4IO_freeBufferPool(BufferPool* bp)
@@ -1995,7 +2307,7 @@ static Buffer BufPool_getBuffer(BufferPool* bp)
     assert(bp->availNext >= bp->usedIdx);
     assert(bp->availNext < bp->usedIdx + PBUFFERS_NB);
 #endif
-    {   int id = bp->availNext++ % PBUFFERS_NB;
+    {   unsigned long long const id = bp->availNext++ % PBUFFERS_NB;
         assert(bp->buffers[id].size == 0);
         return bp->buffers[id];
 }   }
@@ -2007,7 +2319,7 @@ void BufPool_releaseBuffer(BufferPool* bp, Buffer buf)
     /* The following assert() is susceptible to race conditions */
     assert(bp->usedIdx < bp->availNext);
 #endif
-    {   int id = bp->usedIdx++ % PBUFFERS_NB;
+    {   unsigned long long const id = bp->usedIdx++ % PBUFFERS_NB;
         assert(bp->buffers[id].ptr == buf.ptr);
         bp->buffers[id].size = 0;
 }   }
@@ -2026,10 +2338,12 @@ static void LZ4IO_writeDecodedLZ4FChunk(void* arg)
     LZ4FChunkToWrite* const ctw = (LZ4FChunkToWrite*)arg;
     assert(ctw != NULL);
 
-    /* note: works because only 1 thread */
-    *ctw->storedSkips = LZ4IO_fwriteSparse(ctw->fOut, ctw->bufOut.ptr, ctw->bufOut.size, ctw->sparseEnable, *ctw->storedSkips); /* success or die */
-    *ctw->totalSize += (unsigned long long)ctw->bufOut.size; /* note: works because only 1 thread */
-    DISPLAYUPDATE(2, "\rDecompressed : %u MiB  ", (unsigned)(ctw->totalSize[0] >> 20));
+    if (!TPool_jobError()) {   /* otherwise, nothing more to write */
+        /* note: works because only 1 thread */
+        *ctw->storedSkips = LZ4IO_fwriteSparse(ctw->fOut, ctw->bufOut.ptr, ctw->bufOut.size, ctw->sparseEnable, *ctw->storedSkips, 1);
+        *ctw->totalSize += (unsigned long long)ctw->bufOut.size; /* note: works because only 1 thread */
+        DISPLAYUPDATE(2, "\rDecompressed : %u MiB  ", (unsigned)(ctw->totalSize[0] >> 20));
+    }
 
     /* clean up */
     BufPool_releaseBuffer(ctw->bp, ctw->bufOut);
@@ -2057,11 +2371,13 @@ static void LZ4IO_decompressLZ4FChunk(void* arg)
     const char* inPtr = (const char*)lz4fc->inBuffer;
     size_t pos = 0;
 
-    while ((pos < lz4fc->inSize)) {  /* still to read */
+    while ((pos < lz4fc->inSize) && !TPool_jobError()) {  /* still to read */
         size_t remainingInSize = lz4fc->inSize - pos;
         Buffer b = BufPool_getBuffer(lz4fc->bp);
-        if (b.capacity != OUTBUFF_SIZE)
-            END_PROCESS(33, "Could not allocate output buffer!");
+        if (b.capacity != OUTBUFF_SIZE) {
+            JOB_ERROR(33, "Could not allocate output buffer!");
+            break;
+        }
         assert(b.size == 0);
         b.size = b.capacity;
         {   size_t nextToLoad = LZ4F_decompress_usingDict(lz4fc->dctx,
@@ -2069,8 +2385,10 @@ static void LZ4IO_decompressLZ4FChunk(void* arg)
                                 inPtr + pos, &remainingInSize,
                                 lz4fc->dictBuffer, lz4fc->dictBufferSize,
                                 NULL);
-            if (LZ4F_isError(nextToLoad))
-                END_PROCESS(34, "Decompression error : %s", LZ4F_getErrorName(nextToLoad));
+            if (LZ4F_isError(nextToLoad)) {
+                JOB_ERROR(34, "Decompression error : %s", LZ4F_getErrorName(nextToLoad));
+                break;
+            }
             *lz4fc->lastStatus = nextToLoad;
         }
         assert(remainingInSize <= lz4fc->inSize - pos);
@@ -2080,7 +2398,8 @@ static void LZ4IO_decompressLZ4FChunk(void* arg)
         /* push to write thread */
         {   LZ4FChunkToWrite* const ctw = (LZ4FChunkToWrite*)malloc(sizeof(*ctw));
             if (ctw==NULL) {
-                END_PROCESS(35, "Allocation error : can't describe new write job");
+                JOB_ERROR(35, "Allocation error : can't describe new write job");
+                break;
             }
             ctw->bufOut = b;
             ctw->fOut = lz4fc->foutput;
@@ -2145,14 +2464,21 @@ LZ4IO_decompressLZ4F(dRess_t ress,
     for (bSetNb = 0; ; bSetNb = (bSetNb+1) % NB_BUFFSETS) {
         size_t readSize;
 
+        if (TPool_jobError()) break;
+
         /* Read input */
         readSize = fread(inBuffs[bSetNb], 1, INBUFF_SIZE, srcFile);
-        if (ferror(srcFile)) END_PROCESS(26, "Read error");
+        if (ferror(srcFile)) {
+            LZ4IO_waitJobs(tPool, wPool);
+            END_PROCESS(26, "Read error");
+        }
 
         /* push to decoding thread */
         {   LZ4FChunk* const lbi = (LZ4FChunk*)malloc(sizeof(*lbi));
-            if (lbi==NULL)
+            if (lbi==NULL) {
+                LZ4IO_waitJobs(tPool, wPool);
                 END_PROCESS(25, "Allocation error : not enough memory to allocate job descriptor");
+            }
             lbi->dctx = ress.dCtx;
             lbi->inBuffer = inBuffs[bSetNb];
             lbi->inSize = readSize;
@@ -2169,16 +2495,13 @@ LZ4IO_decompressLZ4F(dRess_t ress,
         }
         if (readSize < INBUFF_SIZE) break;   /* likely reached end of stream */
     }
+    LZ4IO_waitJobs(tPool, wPool);
     assert(feof(srcFile));
-
-    /* Wait for all decompression completion */
-    TPool_jobsCompleted(tPool);
 
     /* flush */
     if (lastStatus != 0) {
         END_PROCESS(26, "LZ4F frame decoding could not complete: invalid frame");
     }
-    TPool_jobsCompleted(wPool);
     if (!prefs->testMode) LZ4IO_fwriteSparseEnd(dstFile, storedSkips);
 
     /* Clean */
@@ -2247,7 +2570,7 @@ LZ4IO_decompressLZ4F(dRess_t ress,
             /* Write Block */
             if (decodedBytes) {
                 if (!prefs->testMode)
-                    storedSkips = LZ4IO_fwriteSparse(dstFile, ress.dstBuffer, decodedBytes, prefs->sparseFileSupport, storedSkips);
+                    storedSkips = LZ4IO_fwriteSparse(dstFile, ress.dstBuffer, decodedBytes, prefs->sparseFileSupport, storedSkips, 0);
                 filesize += decodedBytes;
                 DISPLAYUPDATE(2, "\rDecompressed : %u MiB  ", (unsigned)(filesize>>20));
             }
@@ -2270,27 +2593,27 @@ LZ4IO_decompressLZ4F(dRess_t ress,
 /* LZ4IO_passThrough:
  * just output the same content as input, no decoding.
  * This is a capability of zcat, and by extension lz4cat
- * MNstore : contain the first MAGICNUMBER_SIZE bytes already read from finput
+ * MNstore : contain the first MNsize bytes already read from finput
  */
 #define PTSIZE  (64 KB)
 #define PTSIZET (PTSIZE / sizeof(size_t))
 static unsigned long long
 LZ4IO_passThrough(FILE* finput, FILE* foutput,
-                  unsigned char MNstore[MAGICNUMBER_SIZE],
+                  const unsigned char* MNstore, size_t MNsize,
                   int sparseFileSupport)
 {
 	size_t buffer[PTSIZET];
     size_t readBytes = 1;
-    unsigned long long total = MAGICNUMBER_SIZE;
+    unsigned long long total = MNsize;
     unsigned storedSkips = 0;
 
-    if (fwrite(MNstore, 1, MAGICNUMBER_SIZE, foutput) != MAGICNUMBER_SIZE) {
+    if (fwrite(MNstore, 1, MNsize, foutput) != MNsize) {
         END_PROCESS(50, "Pass-through write error");
     }
     while (readBytes) {
         readBytes = fread(buffer, 1, sizeof(buffer), finput);
         total += readBytes;
-        storedSkips = LZ4IO_fwriteSparse(foutput, buffer, readBytes, sparseFileSupport, storedSkips);
+        storedSkips = LZ4IO_fwriteSparse(foutput, buffer, readBytes, sparseFileSupport, storedSkips, 0);
     }
     if (ferror(finput)) END_PROCESS(51, "Read Error");
 
@@ -2315,13 +2638,17 @@ static int skipStream(FILE* f, unsigned offset)
     return 0;
 }
 
-/** Safely handle cases when (unsigned)offset > LONG_MAX */
+/** Safely handle cases when (unsigned)offset > LONG_MAX.
+ *  fseek() succeeds beyond end of file, so the last byte is read instead,
+ *  to detect when fewer than @offset bytes remain (truncated input). */
 static int fseek_u32(FILE *fp, unsigned offset, int where)
 {
     const unsigned stepMax = 1U << 30;
     int errorNb = 0;
 
     if (where != SEEK_CUR) return -1;  /* Only allows SEEK_CUR */
+    if (offset == 0) return 0;
+    offset--;   /* last byte is read below */
     while (offset > 0) {
         unsigned s = offset;
         if (s > stepMax) s = stepMax;
@@ -2330,7 +2657,8 @@ static int fseek_u32(FILE *fp, unsigned offset, int where)
         errorNb = skipStream(fp, offset);
         offset = 0;
     }
-    return errorNb;
+    if (errorNb) return errorNb;
+    return (fgetc(fp) == EOF);
 }
 
 
@@ -2341,7 +2669,8 @@ selectDecoder(dRess_t ress,
               FILE* finput, FILE* foutput,
               const LZ4IO_prefs_t* const prefs)
 {
-    unsigned char MNstore[MAGICNUMBER_SIZE];
+    unsigned char MNstore[MOZLZ4_MAGIC_SIZE];   /* large enough for any magic number */
+    size_t MNsize = MAGICNUMBER_SIZE;           /* nb of bytes read into MNstore */
     unsigned magicNumber;
     static unsigned nbFrames = 0;
 
@@ -2361,6 +2690,17 @@ selectDecoder(dRess_t ress,
     }
     if (LZ4IO_isSkippableMagicNumber(magicNumber))
         magicNumber = LZ4IO_SKIPPABLE0;   /* fold skippable magic numbers */
+    if (magicNumber == LZ4IO_readLE32(MOZLZ4_MAGIC)) {
+        /* first half of mozlz4 magic : check the second half */
+        size_t const secondHalfSize = MOZLZ4_MAGIC_SIZE - MAGICNUMBER_SIZE;
+        MNsize += fread(MNstore + MAGICNUMBER_SIZE, 1, secondHalfSize, finput);
+        if ( MNsize == MOZLZ4_MAGIC_SIZE
+          && !memcmp(MNstore + MAGICNUMBER_SIZE, &MOZLZ4_MAGIC[MAGICNUMBER_SIZE], secondHalfSize) ) {
+            DISPLAYLEVEL(4, "Detected : mozlz4 format \n");
+            return LZ4IO_decodeMozLZ4(finput, foutput, prefs);
+        }
+        /* not mozlz4 : undecodable, see default case */
+    }
 
     switch(magicNumber)
     {
@@ -2386,7 +2726,7 @@ selectDecoder(dRess_t ress,
             /* Wrong magic number at the beginning of 1st stream */
             if (!prefs->testMode && prefs->overwrite && prefs->passThrough) {
                 nbFrames = 0;
-                return LZ4IO_passThrough(finput, foutput, MNstore, prefs->sparseFileSupport);
+                return LZ4IO_passThrough(finput, foutput, MNstore, MNsize, prefs->sparseFileSupport);
             }
             END_PROCESS(44,"Unrecognized header : file cannot be decoded");
         }
@@ -2401,20 +2741,28 @@ selectDecoder(dRess_t ress,
 }
 
 
+/* decodes @input_filename into ress.dstFile, shared by several inputs (@dstShared) or not, see LZ4IO_finishFile()
+ * @return : 0 on success, 1 on failure */
 static int
 LZ4IO_decompressSrcFile(unsigned long long* outGenSize,
                         dRess_t ress,
                         const char* input_filename, const char* output_filename,
+                        int dstShared,
                         const LZ4IO_prefs_t* const prefs)
 {
     FILE* const foutput = ress.dstFile;
     unsigned long long filesize = 0;
     int result = 0;
+    LZ4IO_srcState_t srcState;
 
     /* Init */
     FILE* const finput = LZ4IO_openSrcFile(input_filename);
-    if (finput==NULL) return 1;
     assert(foutput != NULL);
+    if (finput==NULL) {
+        if (!dstShared) fclose(foutput);
+        return 1;
+    }
+    srcState = LZ4IO_getSrcState(finput);
 
     /* Loop over multiple streams */
     for ( ; ; ) {  /* endless loop, see break condition */
@@ -2425,18 +2773,12 @@ LZ4IO_decompressSrcFile(unsigned long long* outGenSize,
         filesize += decodedSize;
     }
 
-    /* Close input */
-    fclose(finput);
-    if (prefs->removeSrcFile) {  /* --rm */
-        if (remove(input_filename))
-            END_PROCESS(45, "Remove error : %s: %s", input_filename, strerror(errno));
-    }
+    LZ4IO_finishFile(finput, &srcState, foutput, dstShared, input_filename, output_filename, !result, prefs);
 
     /* Final Status */
     DISPLAYLEVEL(2, "\r%79s\r", "");
     DISPLAYLEVEL(2, "%-30.30s : decoded %llu bytes \n", input_filename, filesize);
     *outGenSize = filesize;
-    (void)output_filename;
 
     return result;
 }
@@ -2449,30 +2791,10 @@ LZ4IO_decompressDstFile(unsigned long long* outGenSize,
                         const char* output_filename,
                         const LZ4IO_prefs_t* const prefs)
 {
-    int result;
-    stat_t statbuf;
-    int stat_result = 0;
-    FILE* const foutput = LZ4IO_openDstFile(output_filename, prefs);
+    FILE* const foutput = LZ4IO_openDstFile(output_filename, prefs, input_filename);
     if (foutput==NULL) return 1;   /* failure */
-
-    if ( !LZ4IO_isStdin(input_filename)
-      && UTIL_getFileStat(input_filename, &statbuf))
-        stat_result = 1;
-
     ress.dstFile = foutput;
-    result = LZ4IO_decompressSrcFile(outGenSize, ress, input_filename, output_filename, prefs);
-
-    fclose(foutput);
-
-    /* Copy owner, file permissions and modification time */
-    if ( stat_result != 0
-      && !LZ4IO_isStdout(output_filename)
-      && !LZ4IO_isDevNull(output_filename)) {
-        UTIL_setFileStat(output_filename, &statbuf);
-        /* should return value be read ? or is silent fail good enough ? */
-    }
-
-    return result;
+    return LZ4IO_decompressSrcFile(outGenSize, ress, input_filename, output_filename, 0, prefs);
 }
 
 
@@ -2484,11 +2806,11 @@ int LZ4IO_decompressFilename(const char* input_filename, const char* output_file
 {
     dRess_t const ress = LZ4IO_createDResources(prefs);
     TIME_t const timeStart = TIME_getTime();
-    clock_t const cpuStart = clock();
+    double const cpuStart = cpuTime_sec();
     unsigned long long processed = 0;
 
     int const errStat = LZ4IO_decompressDstFile(&processed, ress, input_filename, output_filename, prefs);
-    if (errStat)
+    if (!errStat)
         LZ4IO_finalTimeDisplay(timeStart, cpuStart, processed);
     LZ4IO_freeDResources(ress);
     return errStat;
@@ -2504,45 +2826,49 @@ int LZ4IO_decompressMultipleFilenames(
     unsigned long long totalProcessed = 0;
     int skippedFiles = 0;
     int missingFiles = 0;
-    char* outFileName = (char*)malloc(FNSPACE);
-    size_t ofnSize = FNSPACE;
+    char* outFileName = NULL;
+    size_t ofnSize = 0;
     size_t const suffixSize = strlen(suffix);
     dRess_t ress = LZ4IO_createDResources(prefs);
     TIME_t timeStart = TIME_getTime();
-    clock_t cpuStart = clock();
+    double const cpuStart = cpuTime_sec();
 
-    if (outFileName==NULL) END_PROCESS(70, "Memory allocation error");
     if (prefs->blockChecksum==0 && prefs->streamChecksum==0) {
         DISPLAYLEVEL(4, "disabling checksum validation during decoding \n");
     }
-    ress.dstFile = LZ4IO_openDstFile(stdoutmark, prefs);
+    /* stdout and /dev/null (test mode) are destinations shared by all input files */
+    if (LZ4IO_isStdout(suffix) || LZ4IO_isDevNull(suffix)) {
+        ress.dstFile = LZ4IO_openDstFile(suffix, prefs, NULL);
+        if (ress.dstFile == NULL) END_PROCESS(76, "Cannot open destination %s", suffix);
+    }
 
     for (i=0; i<ifntSize; i++) {
         unsigned long long processed = 0;
         size_t const ifnSize = strlen(inFileNamesTable[i]);
         const char* const suffixPtr = inFileNamesTable[i] + ifnSize - suffixSize;
         if (LZ4IO_isStdout(suffix) || LZ4IO_isDevNull(suffix)) {
-            missingFiles += LZ4IO_decompressSrcFile(&processed, ress, inFileNamesTable[i], suffix, prefs);
+            missingFiles += LZ4IO_decompressSrcFile(&processed, ress, inFileNamesTable[i], suffix, 1, prefs);
             totalProcessed += processed;
             continue;
-        }
-        if (ofnSize <= ifnSize-suffixSize+1) {
-            free(outFileName);
-            ofnSize = ifnSize + 20;
-            outFileName = (char*)malloc(ofnSize);
-            if (outFileName==NULL) END_PROCESS(71, "Memory allocation error");
         }
         if (ifnSize <= suffixSize  || !UTIL_sameString(suffixPtr, suffix) ) {
             DISPLAYLEVEL(1, "File extension doesn't match expected LZ4_EXTENSION (%4s); will not process file: %s\n", suffix, inFileNamesTable[i]);
             skippedFiles++;
             continue;
         }
+        if (LZ4IO_reserveFileName(&outFileName, &ofnSize, ifnSize - suffixSize) == NULL)
+            END_PROCESS(71, "Memory allocation error");
         memcpy(outFileName, inFileNamesTable[i], ifnSize - suffixSize);
         outFileName[ifnSize-suffixSize] = '\0';
         missingFiles += LZ4IO_decompressDstFile(&processed, ress, inFileNamesTable[i], outFileName, prefs);
         totalProcessed += processed;
     }
 
+    if (ress.dstFile != NULL) {
+        /* stdout : write errors may only be reported when buffered output is flushed */
+        if (fflush(ress.dstFile) != 0) END_PROCESS(70, "Write error : cannot write %s", suffix);
+        if (ress.dstFile != stdout && fclose(ress.dstFile) != 0) END_PROCESS(70, "Write error : cannot write %s", suffix);
+    }
     LZ4IO_freeDResources(ress);
     free(outFileName);
     LZ4IO_finalTimeDisplay(timeStart, cpuStart, totalProcessed);
@@ -2598,8 +2924,7 @@ LZ4IO_skipBlocksData(FILE* finput,
     unsigned char blockInfo[LZ4F_BLOCK_HEADER_SIZE];
     unsigned long long totalBlocksSize = 0;
     for (;;) {
-        if (!fread(blockInfo, 1, LZ4F_BLOCK_HEADER_SIZE, finput)) {
-            if (feof(finput)) return totalBlocksSize;
+        if (fread(blockInfo, 1, LZ4F_BLOCK_HEADER_SIZE, finput) != LZ4F_BLOCK_HEADER_SIZE) {
             return 0;
         }
         totalBlocksSize += LZ4F_BLOCK_HEADER_SIZE;
@@ -2609,7 +2934,7 @@ LZ4IO_skipBlocksData(FILE* finput,
                 /* Reached EndMark */
                 if (contentChecksumFlag) {
                     /* Skip content checksum */
-                    if (UTIL_fseek(finput, LZ4F_CONTENT_CHECKSUM_SIZE, SEEK_CUR) != 0) {
+                    if (fread(blockInfo, 1, LZ4F_CONTENT_CHECKSUM_SIZE, finput) != LZ4F_CONTENT_CHECKSUM_SIZE) {
                         return 0;
                     }
                     totalBlocksSize += LZ4F_CONTENT_CHECKSUM_SIZE;
@@ -2661,6 +2986,7 @@ static unsigned long long LZ4IO_skipLegacyBlocksData(FILE* finput)
                 return legacyFrameUndecodable;
             }
             totalBlocksSize += LZ4IO_LEGACY_BLOCK_HEADER_SIZE + nextCBlockSize;
+            if (nextCBlockSize == 0) break;   /* end marker (Linux kernel) */
             /* skip to the next block
              * note : this won't fail if nextCBlockSize is too large, skipping past the end of finput */
             if (UTIL_fseek(finput, nextCBlockSize, SEEK_CUR) != 0) {
@@ -2735,14 +3061,16 @@ LZ4IO_getCompressedFileInfo(LZ4IO_cFileInfo_t* cfinfo, const char* input_filenam
             if (cfinfo->frameSummary.frameType != lz4Frame) cfinfo->eqFrameTypes = 0;
             /* Get frame info */
             {   const size_t readBytes = fread(buffer + MAGICNUMBER_SIZE, 1, LZ4F_HEADER_SIZE_MIN - MAGICNUMBER_SIZE, finput);
-                if (!readBytes || ferror(finput)) END_PROCESS(71, "Error reading %s", input_filename);
+                if (ferror(finput)) END_PROCESS(71, "Error reading %s", input_filename);
+                if (readBytes != LZ4F_HEADER_SIZE_MIN - MAGICNUMBER_SIZE) break;   /* truncated frame header */
             }
             {   size_t hSize = LZ4F_headerSize(&buffer, LZ4F_HEADER_SIZE_MIN);
                 if (LZ4F_isError(hSize)) break;
-                if (hSize > (LZ4F_HEADER_SIZE_MIN + MAGICNUMBER_SIZE)) {
+                if (hSize > LZ4F_HEADER_SIZE_MIN) {
                     /* We've already read LZ4F_HEADER_SIZE_MIN so read any extra until hSize*/
                     const size_t readBytes = fread(buffer + LZ4F_HEADER_SIZE_MIN, 1, hSize - LZ4F_HEADER_SIZE_MIN, finput);
-                    if (!readBytes || ferror(finput)) END_PROCESS(72, "Error reading %s", input_filename);
+                    if (ferror(finput)) END_PROCESS(72, "Error reading %s", input_filename);
+                    if (readBytes != hSize - LZ4F_HEADER_SIZE_MIN) break;   /* truncated frame header */
                 }
                 /* Create decompression context */
                 {   LZ4F_dctx* dctx;

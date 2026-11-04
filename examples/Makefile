@@ -29,25 +29,33 @@
 
 LIBDIR    := ../lib
 
-CPPFLAGS  += -I$(LIBDIR)
+MCM_CPPFLAGS += -I$(LIBDIR)   # flags the build needs : see lib/Makefile
 USERCFLAGS:= $(CFLAGS)
 WFLAGS     = -std=gnu99 -Wall -Wextra -Wundef -Wshadow -Wcast-align -Wstrict-prototypes -Wc++-compat
 CFLAGS     = $(WFLAGS) -O2 $(USERCFLAGS)
 
 TESTFILE   = Makefile
-SLIBLZ4   := $(LIBDIR)/liblz4.a
+TESTFILE_SMALL= .gitignore
 LZ4DIR     = ../programs
 LZ4        = $(LZ4DIR)/lz4
+LIBLZ4DIR  = ../lib
+LIBLZ4SRCS = $(wildcard $(LIBLZ4DIR)/*.c)
+LIBLZ4OBJS = $(LIBLZ4SRCS:.c=.o)
+SLIBLZ4   := liblz4.a
 
 default: all
 
-$(SLIBLZ4): $(LIBDIR)/lz4.c $(LIBDIR)/lz4hc.c $(LIBDIR)/lz4frame.c $(LIBDIR)/lz4.h $(LIBDIR)/lz4hc.h $(LIBDIR)/lz4frame.h $(LIBDIR)/lz4frame_static.h
-	$(MAKE) -j -C $(LIBDIR) liblz4.a
+C_SRCDIRS = $(LIBLZ4DIR)
+include ../build/make/multiconf.make
+
+$(SLIBLZ4): ARFLAGS = rcs
+$(eval $(call static_library,$(SLIBLZ4), $(LIBLZ4OBJS)))
 
 ALL = print_version \
 	  simple_buffer \
 	  frameCompress \
 	  fileCompress \
+	  fileRandomAccess \
       blockStreaming_doubleBuffer \
 	  blockStreaming_ringBuffer \
 	  streamingHC_ringBuffer \
@@ -61,8 +69,9 @@ all: $(ALL)
 $(ALL): $(SLIBLZ4)
 
 .PHONY:$(LZ4)
+$(LZ4): MAKEFLAGS=
 $(LZ4) :
-	$(MAKE) -j -C $(LZ4DIR) lz4
+	$(MAKE) -C $(LZ4DIR) lz4
 
 .PHONY: test
 test : all $(LZ4)
@@ -80,12 +89,15 @@ test : all $(LZ4)
 	./blockStreaming_lineByLine$(EXT) $(TESTFILE)
 	@echo "\n=== Dictionary Random Access ==="
 	./dictionaryRandomAccess$(EXT) $(TESTFILE) $(TESTFILE) 1100 1400
+	./dictionaryRandomAccess$(EXT) $(TESTFILE_SMALL) $(TESTFILE_SMALL) 0 32
 	@echo "\n=== Frame compression ==="
 	./frameCompress$(EXT) $(TESTFILE)
 	$(LZ4) -vt $(TESTFILE).lz4
 	@echo "\n=== file compression ==="
 	./fileCompress$(EXT) $(TESTFILE)
 	$(LZ4) -vt $(TESTFILE).lz4
+	@echo "\n=== file random access ==="
+	./fileRandomAccess$(EXT) $(TESTFILE)
 	@echo "\n=== Q&D benchmark ==="
 	./bench_functions$(EXT) 10000
 

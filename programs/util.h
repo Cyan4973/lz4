@@ -1,6 +1,6 @@
 /*
     util.h - utility functions
-    Copyright (C) 2016-2023, Przemyslaw Skibinski, Yann Collet
+    Copyright (c) Yann Collet. All rights reserved.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -185,13 +185,20 @@ int UTIL_countCores(void);
 ******************************************/
 /*
  * A modified version of realloc().
- * If UTIL_realloc() fails the original block is freed.
-*/
-UTIL_STATIC void* UTIL_realloc(void* ptr, size_t size)
+ * Original block is always freed.
+ */
+UTIL_STATIC void* UTIL_realloc(void* prevPtr, size_t newSize)
 {
-    void* const newptr = realloc(ptr, size);
-    if (newptr) return newptr;
-    free(ptr);
+    if (newSize == 0) {
+        free(prevPtr);
+        return NULL;
+    }
+    /* newSize > 0 */
+    {   void* const newptr = realloc(prevPtr, newSize);
+        if (newptr) return newptr;
+    }
+    /* realloc failed */
+    free(prevPtr);
     return NULL;
 }
 
@@ -401,8 +408,8 @@ UTIL_STATIC int UTIL_prepareFileList(const char* dirName, char** bufStart, size_
             if (*bufStart + *pos + pathLength >= *bufEnd) {
                 ptrdiff_t newListSize = (*bufEnd - *bufStart) + LIST_SIZE_INCREASE;
                 *bufStart = (char*)UTIL_realloc(*bufStart, newListSize);
-                *bufEnd = *bufStart + newListSize;
                 if (*bufStart == NULL) { free(path); FindClose(hFile); return 0; }
+                *bufEnd = *bufStart + newListSize;
             }
             if (*bufStart + *pos + pathLength < *bufEnd) {
                 strncpy(*bufStart + *pos, path, *bufEnd - (*bufStart + *pos));
@@ -452,14 +459,20 @@ UTIL_STATIC int UTIL_prepareFileList(const char* dirName, char** bufStart, size_
         path[pathLength] = 0;
 
         if (UTIL_isDirectory(path)) {
-            nbFiles += UTIL_prepareFileList(path, bufStart, pos, bufEnd);  /* Recursively call "UTIL_prepareFileList" with the new path. */
-            if (*bufStart == NULL) { free(path); closedir(dir); return 0; }
+            struct stat linkStat;
+            if (lstat(path, &linkStat) == 0 && S_ISLNK(linkStat.st_mode)) {
+                /* not followed : it may lead back to a directory being listed */
+                fprintf(stderr, "Warning : %s is a symbolic link to a directory, ignoring\n", path);
+            } else {
+                nbFiles += UTIL_prepareFileList(path, bufStart, pos, bufEnd);  /* Recursively call "UTIL_prepareFileList" with the new path. */
+                if (*bufStart == NULL) { free(path); closedir(dir); return 0; }
+            }
         } else {
             if (*bufStart + *pos + pathLength >= *bufEnd) {
                 size_t const newListSize = (size_t)(*bufEnd - *bufStart) + LIST_SIZE_INCREASE;
                 *bufStart = (char*)UTIL_realloc(*bufStart, newListSize);
-                *bufEnd = *bufStart + newListSize;
                 if (*bufStart == NULL) { free(path); closedir(dir); return 0; }
+                *bufEnd = *bufStart + newListSize;
             }
             if (*bufStart + *pos + pathLength < *bufEnd) {
                 strncpy(*bufStart + *pos, path, *bufEnd - (*bufStart + *pos));

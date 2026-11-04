@@ -1,9 +1,0 @@
-task:
-  name: FreeBSD
-  freebsd_instance:
-    matrix:
-      image_family: freebsd-14-0
-  install_script: pkg install -y gmake
-  script: |
-    cc -v
-    gmake test

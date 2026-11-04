@@ -1,3 +1,34 @@
+v1.11.0
+fix  : data corruption in valid usage : ring buffer decoding (`LZ4_decoderRingBufferSize()`, since v1.9.0), rare cases of streaming or `destSize` compression, one reported by @freedom-winds
+fix  : single-thread `lz4` could truncate the decoding of concatenated frames with block checksums
+fix  : multithreaded decompression could write out of bounds after 2^31 frames (since v1.10.0), by @arshsmith1
+fix  : `LZ4F_compressBegin_usingDict()` ignored the dictionary with independent blocks
+fix  : some periodic data compressed up to 30x worse at fast levels, and very slowly at level 12, reported by @martinus
+fix  : invalid arguments (negative sizes, `NULL`, invalid `blockSizeID`, extreme levels) no longer crash nor overflow, by @arthuz-th, @jaypatrickhoward, @louislafosse, @akashdeshmukh-git, @rinsuki
+fix  : lz4file reports truncated files and write failures, and accepts files < 19 bytes, by @axiqia
+perf : faster decompression on aarch64 and x86-64 (up to +19%, +4% on silesia.tar), `LZ4_FAST_DEC_LOOP` on aarch64 with clang and on riscv64, by @Nicoshev and @arpadpanyik-arm
+perf : faster compression of small blocks at fast levels, with reused states (up to +80%) or dictionaries (up to +35%), partly proposed by @BiplabRaut
+perf : faster levels 11 and 12 (+8% to +27%), level 2 compresses ~0.8% better
+perf : x86 builds avoid the JCC erratum : up to +12% compression and +31% decompression on Intel Skylake-family cpus
+api  : multithreaded lz4frame compression (experimental `LZ4F_preferences_t.nbWorkers`) : output independent of the nb of workers and of the context's history
+api  : random access within frames and lz4 files : `LZ4F_resumeFrame()`, `LZ4F_seek()`, `LZ4F_tell()` (static)
+api  : `LZ4_decompress_safe()` returns distinct error codes : `-1` malformed input, `-2` `dstCapacity` too small, `-3` missing dictionary
+api  : lz4frame compression accepts any `dstCapacity`, and only fails if the output doesn't fit
+api  : removed from headers : functions deprecated since v1.7.x / v1.8.0 (still exported by liblz4), unprefixed lz4frame enums ; `LZ4_resetStream()` and `LZ4_resetStreamHC()` are deprecated
+api  : `LZ4F_compressOptions_t` must be zero-initialized ; reserved fields are scalars (flatten positional initializers) ; `LZ4F_uncompressedUpdate()` deprecated (use `.uncompressed`)
+api  : custom allocators for lz4file (`_advanced()` functions), `LZ4_USER_MEMORY_FUNCTIONS` also for lz4frame and lz4file ; `LZ4F_cctx_size()` and `LZ4F_dctx_size()` by @felixhandte
+api  : HC states include the buffer of levels 10+ (+64 KB per state) : no allocation during compression
+cli  : multithreaded compression relies on liblz4 : same output with any nb of threads and without multithreading support ; `-T#` within a memory budget (`--memory=#`) ; new `--single-thread`
+cli  : decodes Firefox's mozlz4 files, proposed by @UnitedMarsupials, and legacy frames with the Linux kernel end marker, requested by @benjarobin (frame format documentation by @Artoria2e5)
+cli  : safer file handling : an output identical to the input is refused, a source modified during compression is detected, `--rm` keeps the source after failures, by @Furan666, @Nexory and @immanuwell
+cli  : benchmark (`-b`) measures frames, compressed as `lz4` does with the same options
+cli  : various fixes (`--list`, legacy format, benchmark, `-t -m`, numeric arguments), by @tansy, @jmestwa-coder, @akashdeshmukh-git, @arshsmith1, @jlee303 and @Nexory
+build: dynamic library multithreaded by default, static library single-threaded ; cmake `lz4` multithreaded
+build: cmake : exported `lz4::lz4` target by @dg0yt, CMake 4 support by @GeorgH93, `CMAKE_POSITION_INDEPENDENT_CODE` by @ds-sloth
+build: cmake : as a subproject, the `lz4` program is no longer built by default (`-DLZ4_BUILD_CLI=ON` restores it), by @crueter
+build: reproducible static library by @rpurdie, AIX support by @shubhamhii, meson fixes by @grobian, @bgilbert and @eli-schwartz, other fixes by @hotschmoe, @iwamatsu, @doraorak, @JCash and @brainy
+port : RISC-V with `Zicclsm` uses unaligned memory accesses, by @Polaris-911
+
 v1.10.0
 cli  : multithreading compression support: improves speed by X times threads allocated
 cli  : overlap decompression with i/o, improving speed by ~+60%

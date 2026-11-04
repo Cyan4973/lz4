@@ -1,6 +1,6 @@
 LZ4 Block Format Description
 ============================
-Last revised: 2022-07-31 .
+Last revised: 2026-10-26 .
 Author : Yann Collet
 
 
@@ -101,6 +101,9 @@ There is no limit to the number of optional `255` bytes that can be present,
 and therefore no limit to representable match length,
 though real-life implementations are likely going to enforce limits for practical reasons (see more details in "Implementation Notes" section below).
 
+Match bytes are copied one at a time, in increasing order,
+so `matchlength` may exceed `offset`: bytes just copied are copied again.
+
 Note: this format has a maximum achievable compression ratio of about ~250.
 
 Decoding the `matchlength` reaches the end of current sequence.
@@ -113,6 +116,8 @@ There are specific restrictions required to terminate an LZ4 block.
 
 1. The last sequence contains only literals.
    The block ends right after the literals (no `offset` field).
+   The low 4 bits of its `token` (the `matchlength` field) are unused :
+   encoders should set them to 0, and decoders ignore them.
 2. The last 5 bytes of input are always literals.
    Therefore, the last sequence contains at least 5 bytes.
    - Special : if input is smaller than 5 bytes,

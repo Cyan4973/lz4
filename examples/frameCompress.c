@@ -23,7 +23,8 @@ static const LZ4F_preferences_t kPrefs = {
     0,   /* compression level; 0 == default */
     0,   /* autoflush */
     0,   /* favor decompression speed */
-    { 0, 0, 0 },  /* reserved, must be set to 0 */
+    0,   /* nb of worker threads ; 0 == single-threaded */
+    0, 0 /* reserved, must be set to 0 */
 };
 
 
@@ -97,15 +98,18 @@ compress_file_internal(FILE* f_in, FILE* f_out,
       /* input data is at uncompressed data offset */
       if (bytesToOffset <= 0 && uncOffset >= 0 && f_unc) {
         size_t const readSize = fread(inBuff, 1, inSize, f_unc);
+        LZ4F_compressOptions_t uncOpts;
         if (readSize == 0) {
           uncOffset = -1;
           continue;
         }
         count_in += readSize;
-        compressedSize = LZ4F_uncompressedUpdate(ctx,
+        memset(&uncOpts, 0, sizeof(uncOpts));
+        uncOpts.uncompressed = 1;   /* stored as uncompressed blocks */
+        compressedSize = LZ4F_compressUpdate(ctx,
                                              outBuff, outCapacity,
                                              inBuff, readSize,
-                                             NULL);
+                                             &uncOpts);
       } else {
         size_t const readSize = fread(inBuff, 1, inSize, f_in);
         if (readSize == 0) break; /* nothing left to read from input file */
@@ -443,7 +447,7 @@ int main(int argc, char **argv) {
         printf("%s: %zu → %zu bytes, %.1f%%\n",
             inpFilename,
             (size_t)ret.size_in, (size_t)ret.size_out,  /* might overflow is size_t is 32 bits and size_{in,out} > 4 GB */
-            (double)ret.size_out / ret.size_in * 100);
+            (double)ret.size_out / (double)ret.size_in * 100);
         printf("compress : done\n");
     }
 

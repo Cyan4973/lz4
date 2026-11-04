@@ -1,6 +1,6 @@
 /*
   LZ4cli - LZ4 Command Line Interface
-  Copyright (C) Yann Collet 2011-2023
+  Copyright (c) Yann Collet. All rights reserved.
 
   GPL v2 License
 
@@ -47,21 +47,20 @@
 #include <stdio.h>    /* fprintf, getchar */
 #include <stdlib.h>   /* exit, calloc, free */
 #include <string.h>   /* strcmp, strlen */
+#include <limits.h>   /* INT_MAX */
 #include "lz4conf.h"  /* compile-time constants */
 #include "bench.h"    /* BMK_benchFile, BMK_SetNbIterations, BMK_SetBlocksize, BMK_SetPause */
 #include "lz4io.h"    /* LZ4IO_compressFilename, LZ4IO_decompressFilename, LZ4IO_compressMultipleFilenames */
 #include "lz4hc.h"    /* LZ4HC_CLEVEL_MAX */
 #include "lz4.h"      /* LZ4_VERSION_STRING */
+#define LZ4F_STATIC_LINKING_ONLY
+#include "lz4frame.h" /* LZ4F_getMaxNbWorkers */
 
 
 /*****************************
 *  Constants
 ******************************/
-#if LZ4IO_MULTITHREAD
-# define IO_MT "multithread"
-#else
-# define IO_MT "single-thread"
-#endif
+#define IO_MT (multithreadSupport() ? "multithread" : "single-thread")
 #define COMPRESSOR_NAME "lz4"
 #define AUTHOR "Yann Collet"
 #define WELCOME_MESSAGE "*** %s v%s %i-bit %s, by %s ***\n", COMPRESSOR_NAME, LZ4_versionString(), (int)(sizeof(void*)*8), IO_MT, AUTHOR
@@ -106,6 +105,16 @@ static void errorOut(const char* msg)
     DISPLAYLEVEL(1, "%s \n", msg); exit(1);
 }
 
+/* frames are compressed by liblz4's worker threads : both lz4 and liblz4 must support multi-threading */
+static int multithreadSupport(void)
+{
+#if LZ4IO_MULTITHREAD
+    return LZ4F_getMaxNbWorkers() > 0;
+#else
+    return 0;
+#endif
+}
+
 
 /*-************************************
 *  Version modifiers
@@ -131,7 +140,9 @@ static int usage(const char* exeName)
     DISPLAY( "Arguments : \n");
     DISPLAY( " -1     : fast compression (default) \n");
     DISPLAY( " -%2d    : slowest compression level \n", LZ4HC_CLEVEL_MAX);
-    DISPLAY( " -T#    : use # threads for compression (default:%i==auto) \n", LZ4_NBWORKERS_DEFAULT);
+#if LZ4IO_MULTITHREAD
+    DISPLAY( " -T#    : use # worker threads for compression (default:%i==auto) \n", LZ4_NBWORKERS_DEFAULT);
+#endif
     DISPLAY( " -d     : decompression (default for %s extension)\n", LZ4_EXTENSION);
     DISPLAY( " -f     : overwrite output without prompting \n");
     DISPLAY( " -k     : preserve source files(s)  (default) \n");
@@ -160,6 +171,9 @@ static int usage_advanced(const char* exeName)
     DISPLAY( " -D FILE: use FILE as dictionary (compression & decompression)\n");
     DISPLAY( " -B#    : cut file into blocks of size # bytes [32+] \n");
     DISPLAY( "                     or predefined block size [4-7] (default: %i) \n", LZ4_BLOCKSIZEID_DEFAULT);
+#if LZ4IO_MULTITHREAD
+    DISPLAY( "                     (custom sizes : single-threaded compression) \n");
+#endif
     DISPLAY( " -BI    : Block Independence (default) \n");
     DISPLAY( " -BD    : Block dependency (improves compression ratio) \n");
     DISPLAY( " -BX    : enable block checksum (default:disabled) \n");
@@ -167,6 +181,13 @@ static int usage_advanced(const char* exeName)
     DISPLAY( "--content-size : compressed frame includes original size (default:not present)\n");
     DISPLAY( "--list FILE : lists information about .lz4 files (useful for files compressed with --content-size flag)\n");
     DISPLAY( "--[no-]sparse  : sparse mode (default:enabled on file, disabled on stdout)\n");
+#if LZ4IO_MULTITHREAD
+    DISPLAY( "--memory=#     : memory budget of multi-threaded compression (default: %u MB) ; suffixes K, M, G \n",
+                (unsigned)(LZ4IO_defaultMemoryBudget() >> 20));
+#endif
+    DISPLAY( "--single-thread: compress frames with the main thread alone, not cut into jobs (output can differ from -T1 with -BD)\n");
+    DISPLAY( "--[no-]mmap    : memory-map files to compress (default:enabled when supported)\n");
+    DISPLAY( "                 note : compression fails if the file is truncated or rewritten meanwhile \n");
     DISPLAY( "--favor-decSpeed: compressed files decompress faster, but are less compressed \n");
     DISPLAY( "--fast[=#]: switch to ultra fast compression level (default: %i)\n", 1);
     DISPLAY( "--best  : same as -%d\n", LZ4HC_CLEVEL_MAX);
@@ -206,8 +227,11 @@ static int usage_longhelp(const char* exeName)
     DISPLAY( "\n");
     DISPLAY( "Compression levels : \n");
     DISPLAY( "---------------------\n");
-    DISPLAY( "-0 ... -2  => Fast compression, all identical\n");
-    DISPLAY( "-3 ... -%d => High compression; higher number == more compression but slower\n", LZ4HC_CLEVEL_MAX);
+    DISPLAY( "-0  => Default level, identical to -%u \n", LZ4_CLEVEL_DEFAULT);
+    DISPLAY( "-1  => Fast compression \n");
+    DISPLAY( "-2 .. -%d => High compression; higher number == more compression but slower\n", LZ4HC_CLEVEL_MAX);
+    DISPLAY( "--best    => Highest available compression level (-%d) \n", LZ4HC_CLEVEL_MAX);
+    DISPLAY( "--fast=#  => Faster compression; higher number == faster but compress less\n");
     DISPLAY( "\n");
     DISPLAY( "stdin, stdout and the console : \n");
     DISPLAY( "--------------------------------\n");
@@ -276,27 +300,90 @@ static int exeNameMatch(const char* exeName, const char* test)
         (exeName[strlen(test)] == '\0' || exeName[strlen(test)] == '.');
 }
 
-/*! readU32FromChar() :
- * @return : unsigned integer value read from input in `char` format
+/*! readU32FromCharChecked() :
+ * @return 0 if success, and store the result in *value.
  *  allows and interprets K, KB, KiB, M, MB and MiB suffix.
  *  Will also modify `*stringPtr`, advancing it to position where it stopped reading.
- *  Note : function result can overflow if digit string > MAX_UINT */
-static unsigned readU32FromChar(const char** stringPtr)
+ * @return 1 if an overflow error occurs */
+static int readU32FromCharChecked(const char** stringPtr, unsigned* value)
 {
+    unsigned const maxValue = (unsigned)-1;
     unsigned result = 0;
     while ((**stringPtr >='0') && (**stringPtr <='9')) {
-        result *= 10;
-        result += (unsigned)(**stringPtr - '0');
+        unsigned const digit = (unsigned)(**stringPtr - '0');
+        if (result > (maxValue - digit) / 10) return 1;  /* overflow */
+        result = result * 10 + digit;
         (*stringPtr)++ ;
     }
     if ((**stringPtr=='K') || (**stringPtr=='M')) {
+        if (result > (maxValue >> 10)) return 1;  /* overflow */
         result <<= 10;
-        if (**stringPtr=='M') result <<= 10;
+        if (**stringPtr=='M') {
+            if (result > (maxValue >> 10)) return 1;  /* overflow */
+            result <<= 10;
+        }
         (*stringPtr)++ ;
         if (**stringPtr=='i') (*stringPtr)++;
         if (**stringPtr=='B') (*stringPtr)++;
     }
+    *value = result;
+    return 0;
+}
+
+/*! readU32FromChar() :
+ * @return : unsigned integer value read from input in `char` format.
+ *  allows and interprets K, KB, KiB, M, MB and MiB suffix.
+ *  Will also modify `*stringPtr`, advancing it to position where it stopped reading.
+ *  Note : exits with an error message if the value overflows 32 bits */
+static unsigned readU32FromChar(const char** stringPtr)
+{
+    unsigned result;
+    if (readU32FromCharChecked(stringPtr, &result)) {
+        errorOut("error: numeric value overflows 32-bit unsigned int");
+    }
     return result;
+}
+
+/*! readIntFromChar() :
+ *  same as readU32FromChar(), for values stored into an `int` (compression levels).
+ *  Note : exits with an error message if the value is larger than INT_MAX */
+static int readIntFromChar(const char** stringPtr)
+{
+    unsigned const result = readU32FromChar(stringPtr);
+    if (result > (unsigned)INT_MAX) {
+        errorOut("error: numeric value is too large");
+    }
+    return (int)result;
+}
+
+/*! readSizeFromCharChecked() :
+ * @return 0 if success, and store the result (in bytes) in *value.
+ *  allows and interprets K, KB, KiB, M, MB, MiB, G, GB and GiB suffixes (powers of 1024).
+ *  Will also modify `*stringPtr`, advancing it to position where it stopped reading.
+ * @return 1 if an overflow error occurs */
+static int readSizeFromCharChecked(const char** stringPtr, U64* value)
+{
+    U64 const maxValue = (U64)-1;
+    U64 result = 0;
+    unsigned shift = 0;
+    while ((**stringPtr >='0') && (**stringPtr <='9')) {
+        unsigned const digit = (unsigned)(**stringPtr - '0');
+        if (result > (maxValue - digit) / 10) return 1;  /* overflow */
+        result = result * 10 + digit;
+        (*stringPtr)++ ;
+    }
+    if (**stringPtr=='K') shift = 10;
+    if (**stringPtr=='M') shift = 20;
+    if (**stringPtr=='G') shift = 30;
+    if (shift) {
+        if (result > (maxValue >> shift)) return 1;  /* overflow */
+        result <<= shift;
+        (*stringPtr)++ ;
+        if (**stringPtr=='i') (*stringPtr)++;
+        if (**stringPtr=='B') (*stringPtr)++;
+    }
+    *value = result;
+    return 0;
 }
 
 #define CLEAN_RETURN(i) { operationResult = (i); goto _cleanup; }
@@ -328,14 +415,15 @@ static unsigned readU32FromChar(const char** stringPtr)
 }
 
 /** longCommandWArg() :
- *  check if *stringPtr is the same as longCommand.
+ *  check if *stringPtr is longCommand, alone or followed by '=' (ex: --memory, --memory=10M).
  *  If yes, @return 1 and advances *stringPtr to the position which immediately follows longCommand.
- * @return 0 and doesn't modify *stringPtr otherwise.
+ * @return 0 and doesn't modify *stringPtr otherwise (ex: --memoryX).
  */
 static int longCommandWArg(const char** stringPtr, const char* longCommand)
 {
     size_t const comSize = strlen(longCommand);
-    int const result = !strncmp(*stringPtr, longCommand, comSize);
+    int const result = !strncmp(*stringPtr, longCommand, comSize)
+                    && ((*stringPtr)[comSize] == '=' || (*stringPtr)[comSize] == 0);
     if (result) *stringPtr += comSize;
     return result;
 }
@@ -357,17 +445,37 @@ static operationMode_e determineOpMode(const char* inputFilename)
 
 #define ENV_NBTHREADS "LZ4_NBWORKERS"
 
-static unsigned init_nbWorkers(void)
+/* @requested : set to 1 when provided by environment */
+static unsigned init_nbWorkers(int* requested)
 {
     const char* const env = getenv(ENV_NBTHREADS);
+    *requested = 0;
     if (env != NULL) {
         const char* ptr = env;
-        if ((*ptr>='0') && (*ptr<='9')) {
-            return readU32FromChar(&ptr);
+        unsigned nbWorkers;
+        if ((*ptr>='0') && (*ptr<='9') && !readU32FromCharChecked(&ptr, &nbWorkers)
+          && (*ptr == 0)) {
+            *requested = 1;
+            return nbWorkers;
         }
         DISPLAYLEVEL(2, "Ignore environment variable setting %s=%s: not a valid unsigned value \n", ENV_NBTHREADS, env);
     }
     return LZ4_NBWORKERS_DEFAULT;
+}
+
+#define ENV_MEMORY "LZ4_MEMORY"
+
+/* @return : memory budget of multi-threaded compression set by environment (bytes), or 0 when not set */
+static U64 init_memoryBudget(void)
+{
+    const char* const env = getenv(ENV_MEMORY);
+    if (env != NULL) {
+        const char* ptr = env;
+        U64 budget;
+        if (!readSizeFromCharChecked(&ptr, &budget) && (budget > 0) && (*ptr == 0)) return budget;
+        DISPLAYLEVEL(2, "Ignore environment variable setting %s=%s: not a valid size \n", ENV_MEMORY, env);
+    }
+    return 0;
 }
 
 #define ENV_CLEVEL "LZ4_CLEVEL"
@@ -377,8 +485,10 @@ static int init_cLevel(void)
     const char* const env = getenv(ENV_CLEVEL);
     if (env != NULL) {
         const char* ptr = env;
-        if ((*ptr>='0') && (*ptr<='9')) {
-            return (int)readU32FromChar(&ptr);
+        unsigned cLevel;
+        if ((*ptr>='0') && (*ptr<='9') && !readU32FromCharChecked(&ptr, &cLevel)
+          && (*ptr == 0) && (cLevel <= (unsigned)INT_MAX)) {
+            return (int)cLevel;
         }
         DISPLAYLEVEL(2, "Ignore environment variable setting %s=%s: not a valid unsigned value \n", ENV_CLEVEL, env);
     }
@@ -389,15 +499,20 @@ int main(int argCount, const char** argv)
 {
     int argNb,
         cLevel=init_cLevel(),
-        cLevelLast=-10000,
+        cLevelLast=INT_MIN,   /* unset : benchmark cLevel only */
         legacy_format=0,
         forceStdout=0,
         forceOverwrite=0,
         main_pause=0,
         multiple_inputs=0,
         all_arguments_are_files=0,
-        operationResult=0;
-    unsigned nbWorkers = init_nbWorkers();
+        operationResult=0,
+        contentSizeFlag=0,
+        nbWorkersRequested=0,   /* -T#, or LZ4_NBWORKERS */
+        singleThread=0,         /* --single-thread */
+        frameCrcRequested=0;    /* --frame-crc */
+    unsigned nbWorkers = init_nbWorkers(&nbWorkersRequested);
+    U64 memoryBudget = init_memoryBudget();   /* 0 : default */
     operationMode_e mode = om_auto;
     const char* input_filename = NULL;
     const char* output_filename= NULL;
@@ -407,7 +522,6 @@ int main(int argCount, const char** argv)
     unsigned ifnIdx=0;
     LZ4IO_prefs_t* const prefs = LZ4IO_defaultPreferences();
     const char nullOutput[] = NULL_OUTPUT;
-    const char extension[] = LZ4_EXTENSION;
     size_t blockSize = LZ4IO_setBlockSizeID(prefs, LZ4_BLOCKSIZEID_DEFAULT);
     const char* const exeName = lastNameFromPath(argv[0]);
     char* fileNamesBuf = NULL;
@@ -469,14 +583,16 @@ int main(int argCount, const char** argv)
                 if (!strcmp(argument,  "--no-force")) { LZ4IO_setOverwrite(prefs, 0); continue; }
                 if ((!strcmp(argument, "--stdout"))
                     || (!strcmp(argument, "--to-stdout"))) { forceStdout=1; output_filename=stdoutmark; continue; }
-                if (!strcmp(argument,  "--frame-crc")) { LZ4IO_setStreamChecksumMode(prefs, 1); BMK_skipChecksums(0); continue; }
+                if (!strcmp(argument,  "--frame-crc")) { LZ4IO_setStreamChecksumMode(prefs, 1); BMK_skipChecksums(0); frameCrcRequested=1; continue; }
                 if (!strcmp(argument,  "--no-frame-crc")) { LZ4IO_setStreamChecksumMode(prefs, 0); BMK_skipChecksums(1); continue; }
                 if (!strcmp(argument,  "--no-crc")) { LZ4IO_setStreamChecksumMode(prefs, 0); LZ4IO_setBlockChecksumMode(prefs, 0); BMK_skipChecksums(1); continue; }
-                if (!strcmp(argument,  "--content-size")) { LZ4IO_setContentSize(prefs, 1); continue; }
+                if (!strcmp(argument,  "--content-size")) { contentSizeFlag = 1; LZ4IO_setContentSize(prefs, 1); continue;}
                 if (!strcmp(argument,  "--no-content-size")) { LZ4IO_setContentSize(prefs, 0); continue; }
                 if (!strcmp(argument,  "--list")) { mode = om_list; multiple_inputs = 1; continue; }
                 if (!strcmp(argument,  "--sparse")) { LZ4IO_setSparseFile(prefs, 2); continue; }
                 if (!strcmp(argument,  "--no-sparse")) { LZ4IO_setSparseFile(prefs, 0); continue; }
+                if (!strcmp(argument,  "--mmap")) { LZ4IO_setMmap(prefs, 1); continue; }
+                if (!strcmp(argument,  "--no-mmap")) { LZ4IO_setMmap(prefs, 0); continue; }
                 if (!strcmp(argument,  "--favor-decSpeed")) { LZ4IO_favorDecSpeed(prefs, 1); continue; }
                 if (!strcmp(argument,  "--verbose")) { displayLevel++; continue; }
                 if (!strcmp(argument,  "--quiet")) { if (displayLevel) displayLevel--; continue; }
@@ -487,22 +603,34 @@ int main(int argCount, const char** argv)
 
                 if (longCommandWArg(&argument, "--threads")) {
                     NEXT_UINT32(nbWorkers);
+                    nbWorkersRequested = 1;
+                    singleThread = 0;
+                    continue;
+                }
+                if (!strcmp(argument, "--single-thread")) {
+                    singleThread = 1;
+                    continue;
+                }
+                if (longCommandWArg(&argument, "--memory")) {
+                    const char* sizeStr;
+                    NEXT_FIELD(sizeStr);
+                    if (readSizeFromCharChecked(&sizeStr, &memoryBudget))
+                        errorOut("error: --memory value overflows 64-bit unsigned int");
+                    if ((*sizeStr != 0) || (memoryBudget == 0))
+                        errorOut("error: --memory requires a size, with optional suffixes K, KB, KiB, M, MB, MiB, G, GB, GiB");
                     continue;
                 }
                 if (longCommandWArg(&argument, "--fast")) {
                     /* Parse optional acceleration factor */
                     if (*argument == '=') {
-                        U32 fastLevel;
+                        int fastLevel;
                         ++argument;
-                        fastLevel = readU32FromChar(&argument);
-                        if (fastLevel) {
-                            cLevel = -(int)fastLevel;
+                        fastLevel = readIntFromChar(&argument);
+                        if (fastLevel && *argument == 0) {
+                            cLevel = -fastLevel;
                         } else {
                             badusage(exeName);
                         }
-                    } else if (*argument != 0) {
-                        /* Invalid character following --fast */
-                        badusage(exeName);
                     } else {
                         cLevel = -1;  /* default for --fast */
                     }
@@ -526,7 +654,7 @@ int main(int argCount, const char** argv)
                 }
 
                 if ((*argument>='0') && (*argument<='9')) {
-                    cLevel = (int)readU32FromChar(&argument);
+                    cLevel = readIntFromChar(&argument);
                     argument--;
                     continue;
                 }
@@ -541,7 +669,7 @@ int main(int argCount, const char** argv)
 
                 case 'e':
                     argument++;
-                    cLevelLast = (int)readU32FromChar(&argument);
+                    cLevelLast = readIntFromChar(&argument);
                     argument--;
                     break;
 
@@ -552,6 +680,8 @@ int main(int argCount, const char** argv)
                 case 'T':
                     {   argument++;
                         nbWorkers = readU32FromChar(&argument);
+                        nbWorkersRequested = 1;
+                        singleThread = 0;
                         argument--;
                     }
                     break;
@@ -624,12 +754,10 @@ int main(int argCount, const char** argv)
                                 if (B < 4) badusage(exeName);
                                 if (B <= 7) {
                                     blockSize = LZ4IO_setBlockSizeID(prefs, B);
-                                    BMK_setBlockSize(blockSize);
                                     DISPLAYLEVEL(2, "using blocks of size %u KB \n", (U32)(blockSize>>10));
                                 } else {
                                     if (B < 32) badusage(exeName);
                                     blockSize = LZ4IO_setBlockSize(prefs, B);
-                                    BMK_setBlockSize(blockSize);
                                     if (blockSize >= 1024) {
                                         DISPLAYLEVEL(2, "using blocks of size %u KB \n", (U32)(blockSize>>10));
                                     } else {
@@ -715,11 +843,9 @@ int main(int argCount, const char** argv)
 #ifdef _FILE_OFFSET_BITS
     DISPLAYLEVEL(5, "_FILE_OFFSET_BITS defined: %ldL\n", (long) _FILE_OFFSET_BITS);
 #endif
-#if !LZ4IO_MULTITHREAD
-    if (nbWorkers > 1) {
+    if ((nbWorkers > 1) && !multithreadSupport()) {
         DISPLAYLEVEL(2, "warning: this executable doesn't support multithreading \n");
     }
-#endif
     if ((mode == om_compress) || (mode == om_bench)) {
         DISPLAYLEVEL(4, "Blocks size : %u KB\n", (U32)(blockSize>>10));
     }
@@ -749,6 +875,20 @@ int main(int argCount, const char** argv)
 
     /* benchmark and test modes */
     if (mode == om_bench) {
+        /* frames compressed as lz4 does with the same options, except the content checksum (disabled unless --frame-crc) :
+         * one worker thread (-T1) unless -T# (or LZ4_NBWORKERS), or --single-thread */
+        LZ4F_preferences_t framePrefs;
+        size_t const customBlockSize = LZ4IO_framePreferences(prefs, &framePrefs);
+        if (!frameCrcRequested) framePrefs.frameInfo.contentChecksumFlag = LZ4F_noContentChecksum;
+        framePrefs.nbWorkers = singleThread ? 0 : 1;
+        if (nbWorkersRequested && !singleThread) {
+            int const requested = (nbWorkers > (unsigned)INT_MAX) ? INT_MAX : (int)nbWorkers;
+            int const applied = LZ4IO_setNbWorkers(prefs, requested);   /* 0 : automatic ; capped as within liblz4 */
+            if (multithreadSupport() && (requested > applied))
+                DISPLAYLEVEL(2, "Warning : requested %u threads too large => automatically reduced to %i \n", nbWorkers, applied);
+            framePrefs.nbWorkers = (unsigned)applied;
+        }
+        BMK_setFramePreferences(&framePrefs, customBlockSize);
         BMK_setNotificationLevel(displayLevel);
         operationResult = BMK_benchFiles(inFileNames, ifnIdx, cLevel, cLevelLast, dictionary_filename);
         goto _cleanup;
@@ -772,6 +912,9 @@ int main(int argCount, const char** argv)
     if (!strcmp(input_filename, stdinmark)) {
         /* if input==stdin and no output defined, stdout becomes default output */
         if (!output_filename) output_filename = stdoutmark;
+        if (contentSizeFlag){
+            DISPLAYLEVEL(2, "warning : --content-size cannot determine size when used with stdin\n");
+        }
     }
 
     /* No output filename ==> try to select one automatically (when possible) */
@@ -790,15 +933,12 @@ int main(int argCount, const char** argv)
         }
         if (mode == om_decompress) {
             /* decompress to file (automatic output name only works if input filename has correct format extension) */
-            size_t outl;
             size_t const inl = strlen(input_filename);
-            dynNameSpace = (char*)calloc(1,inl+1);
+            size_t const extl = strlen(LZ4_EXTENSION);
+            if ((inl <= extl) || strcmp(input_filename + inl - extl, LZ4_EXTENSION)) { DISPLAYLEVEL(1, "Cannot determine an output filename \n"); badusage(exeName); }
+            dynNameSpace = (char*)calloc(1, inl - extl + 1);
             if (dynNameSpace==NULL) { perror(exeName); exit(1); }
-            strcpy(dynNameSpace, input_filename);
-            outl = inl;
-            if (inl>4)
-                while ((outl >= inl-4) && (input_filename[outl] ==  extension[outl-inl+4])) dynNameSpace[outl--]=0;
-            if (outl != inl-5) { DISPLAYLEVEL(1, "Cannot determine an output filename \n"); badusage(exeName); }
+            memcpy(dynNameSpace, input_filename, inl - extl);
             output_filename = dynNameSpace;
             DISPLAYLEVEL(2, "Decoding file %s \n", output_filename);
         }
@@ -847,19 +987,16 @@ int main(int argCount, const char** argv)
         operationResult = LZ4IO_displayCompressedFilesInfo(inFileNames, ifnIdx);
     } else {   /* compression is default action */
 #if LZ4IO_MULTITHREAD
-        if (nbWorkers != 1) {
-            if (nbWorkers==0)
-                nbWorkers = (unsigned)LZ4IO_defaultNbWorkers();
-            if (nbWorkers > LZ4_NBWORKERS_MAX) {
-                DISPLAYLEVEL(3, "Requested %u threads too large => automatically reduced to %u \n",
-                            nbWorkers, LZ4_NBWORKERS_MAX);
-                nbWorkers = LZ4_NBWORKERS_MAX;
-            } else {
-                DISPLAYLEVEL(3, "Using %u threads for compression \n", nbWorkers);
-            }
+        /* nbWorkers 0 : automatic (nb of cores) ; both automatic and explicit :
+         * within memory budget (--memory, LZ4_MEMORY), and no more than the jobs of each file */
+        {   int const requested = (nbWorkers > (unsigned)INT_MAX) ? INT_MAX : (int)nbWorkers;
+            int const applied = LZ4IO_setNbWorkers(prefs, requested);   /* capped as within liblz4 */
+            if (multithreadSupport() && (requested > applied))   /* requested (-T#, LZ4_NBWORKERS) : automatic is 0 */
+                DISPLAYLEVEL(2, "Warning : requested %u threads too large => automatically reduced to %i \n", nbWorkers, applied);
         }
-        LZ4IO_setNbWorkers(prefs, (int)nbWorkers);
+        LZ4IO_setMemoryBudget(prefs, memoryBudget);
 #endif
+        LZ4IO_setSingleThread(prefs, singleThread);
         if (legacy_format) {
             DISPLAYLEVEL(3, "! Generating LZ4 Legacy format (deprecated) ! \n");
             if(multiple_inputs){

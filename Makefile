@@ -36,8 +36,9 @@ TESTDIR = tests
 EXDIR   = examples
 FUZZDIR = ossfuzz
 
-include Makefile.inc
+include build/make/lz4defs.make
 
+MAKE += --no-print-directory
 
 .PHONY: default
 default: lib-release lz4-release
@@ -51,21 +52,18 @@ all: allmost examples manuals build_tests
 .PHONY: allmost
 allmost: lib lz4
 
-.PHONY: lib lib-release liblz4.a
-lib: liblz4.a
-lib lib-release liblz4.a:
+.PHONY: lib lib-release lib-mt lib-nomt liblz4.a
+lib lib-release lib-mt lib-nomt liblz4.a:
 	$(MAKE) -C $(LZ4DIR) $@
 
 .PHONY: lz4 lz4-release
-lz4 : liblz4.a
-lz4-release : lib-release
 lz4 lz4-release :
 	$(MAKE) -C $(PRGDIR) $@
 	$(LN_SF) $(PRGDIR)/lz4$(EXT) .
 	echo lz4 build completed
 
 .PHONY: examples
-examples: liblz4.a
+examples: lib
 	$(MAKE) -C $(EXDIR) all
 
 .PHONY: manuals
@@ -77,6 +75,7 @@ build_tests:
 	$(MAKE) -C $(TESTDIR) all
 
 .PHONY: clean
+clean: MAKEFLAGS= --no-print-directory
 clean:
 	$(MAKE) -C $(LZ4DIR) $@ > $(VOID)
 	$(MAKE) -C $(PRGDIR) $@ > $(VOID)
@@ -96,6 +95,9 @@ ifeq ($(POSIX_ENV),Yes)
 HOST_OS = POSIX
 
 .PHONY: install uninstall
+# lib/ installs the libraries already built (lib, lib-mt, lib-nomt), or builds them when absent :
+# when also requested, build them first, so that `make all install` doesn't run 2 concurrent builds in lib/
+install: $(filter all lib lib-release lib-mt lib-nomt liblz4.a,$(MAKECMDGOALS)) lz4
 install uninstall:
 	$(MAKE) -C $(LZ4DIR) $@
 	$(MAKE) -C $(PRGDIR) $@
@@ -152,6 +154,9 @@ usan: LDFLAGS = $(CFLAGS)
 usan: clean
 	CC=$(CC) CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(MAKE) test FUZZER_TIME="-T30s" NB_LOOPS=-i1
 
+.PHONY: ubsan
+ubsan: usan
+
 .PHONY: usan32
 usan32: CFLAGS = -m32 -O3 -g -fsanitize=undefined -fno-sanitize-recover=undefined -fsanitize-recover=pointer-overflow
 usan32: LDFLAGS = $(CFLAGS)
@@ -193,19 +198,19 @@ ctocxxtest: LIBCC="$(CC)"
 ctocxxtest: EXECC="$(CXX) -Wno-deprecated"
 ctocxxtest: CFLAGS=-O0
 ctocxxtest:
-	CC=$(LIBCC) $(MAKE) -C $(LZ4DIR)  CFLAGS="$(CFLAGS)" all
+	CFLAGS="$(CFLAGS)" CC=$(LIBCC) $(MAKE) -C $(LZ4DIR)  all
 	CC=$(LIBCC) $(MAKE) -C $(TESTDIR) CFLAGS="$(CFLAGS)" lz4.o lz4hc.o lz4frame.o
 	CC=$(EXECC) $(MAKE) -C $(TESTDIR) CFLAGS="$(CFLAGS)" all
 
 .PHONY: cxxtest cxx32test
-cxx32test: CFLAGS += -m32
-cxxtest cxx32test: CC := "$(CXX) -Wno-deprecated"
+cxxtest: CC := "$(CXX) -Wno-deprecated"
+cxx32test: CC := "$(CXX) -Wno-deprecated -m32"   # in CC : CFLAGS is replaced below, or on the command line
 cxxtest cxx32test: CFLAGS = -O3 -Wall -Wextra -Wundef -Wshadow -Wcast-align -Werror
 cxxtest cxx32test:
 	$(CXX) -v
-	CC=$(CC) $(MAKE) -C $(LZ4DIR)  all CFLAGS="$(CFLAGS)"
-	CC=$(CC) $(MAKE) -C $(PRGDIR)  all CFLAGS="$(CFLAGS)"
-	CC=$(CC) $(MAKE) -C $(TESTDIR) all CFLAGS="$(CFLAGS)"
+	CC=$(CC) CFLAGS="$(CFLAGS)" $(MAKE) -C $(LZ4DIR)  all
+	CC=$(CC) CFLAGS="$(CFLAGS)" $(MAKE) -C $(PRGDIR)  all
+	CC=$(CC) CFLAGS="$(CFLAGS)" $(MAKE) -C $(TESTDIR) all
 
 .PHONY: cxx17build
 cxx17build : CC = "$(CXX) -Wno-deprecated"
@@ -236,39 +241,21 @@ c_standards_c11: clean
 # The following test ensures that standard Makefile variables set through environment
 # are correctly transmitted at compilation stage.
 # This test is meant to detect issues like https://github.com/lz4/lz4/issues/958
-.PHONY: standard_variables
-standard_variables:
-	$(MAKE) clean
-	@echo =================
-	@echo Check support of Makefile Standard variables through environment
-	@echo note : this test requires V=1 to work properly
-	@echo =================
-	CC="cc -DCC_TEST" \
-	CFLAGS=-DCFLAGS_TEST \
-	CPPFLAGS=-DCPPFLAGS_TEST \
-	LDFLAGS=-DLDFLAGS_TEST \
-	LDLIBS=-DLDLIBS_TEST \
-	$(MAKE) V=1 > tmpsv
-	# Note: just checking the presence of custom flags
-	# would not detect situations where custom flags are
-	# supported in some part of the Makefile, and missed in others.
-	# So the test checks if they are present the _right nb of times_.
-	# However, checking static quantities makes this test brittle,
-	# because quantities (10, 2 and 1) can still evolve in future,
-	# for example when source directories or Makefile evolve.
-	if [ $$(grep CC_TEST tmpsv | wc -l) -ne 10 ]; then \
-		echo "CC environment variable missed" && False; fi
-	if [ $$(grep CFLAGS_TEST tmpsv | wc -l) -ne 10 ]; then \
-		echo "CFLAGS environment variable missed" && False; fi
-	if [ $$(grep CPPFLAGS_TEST tmpsv | wc -l) -ne 10 ]; then \
-		echo "CPPFLAGS environment variable missed" && False; fi
-	if [ $$(grep LDFLAGS_TEST tmpsv | wc -l) -ne 2 ]; then \
-		echo "LDFLAGS environment variable missed" && False; fi
-	if [ $$(grep LDLIBS_TEST tmpsv | wc -l) -ne 1 ]; then \
-		echo "LDLIBS environment variable missed" && False; fi
-	@echo =================
-	@echo all custom variables detected
-	@echo =================
-	$(RM) tmpsv
+# Flags a target needs (MCM_* : -m32, -DNDEBUG, -std=c90) must stay with them.
+STDVARS_TEST = CC='cc -DCC_TEST' CFLAGS='-DCFLAGS_TEST' CPPFLAGS='-DCPPFLAGS_TEST' LDFLAGS='-DLDFLAGS_TEST' LDLIBS='-DLDLIBS_TEST'
+.PHONY: test_stdvars
+test_stdvars:  ## CI helper – verifies CC/CFLAGS/CPPFLAGS/LDFLAGS/LDLIBS propagation
+	@echo '--- standard-variable propagation test ---'
+	@$(RM) .stdvars.log
+
+	@$(MAKE) -rn V=1 $(STDVARS_TEST) | tee .stdvars.log >/dev/null
+	@tests/compat/check_stdvars.sh .stdvars.log
+	@$(MAKE) -rn V=1 -C $(TESTDIR) all32 $(STDVARS_TEST) > .stdvars.log
+	@tests/compat/check_stdvars.sh .stdvars.log -m32
+	@$(MAKE) -rn V=1 -C $(TESTDIR) fullbench datagen $(STDVARS_TEST) > .stdvars.log
+	@tests/compat/check_stdvars.sh .stdvars.log -DNDEBUG
+	@$(MAKE) -nB V=1 -C $(TESTDIR) lz4_all.o $(STDVARS_TEST) > .stdvars.log
+	@tests/compat/check_stdvars.sh .stdvars.log -std=c90
+	@$(RM) .stdvars.log
 
 endif   # MSYS POSIX

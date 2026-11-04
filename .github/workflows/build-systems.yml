@@ -1,0 +1,152 @@
+# Build system testing (Visual Studio, Meson)
+name: Build Systems
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+
+jobs:
+  windows-visual-studio:
+    name: ${{ matrix.system.os }} Visual Studio
+    runs-on: ${{ matrix.system.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        system:
+          - { os: windows-2022, build_path: ".\\build\\VS2022" }
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Build Win32 Debug
+      # Switching to debug mode, since vs2022 optimizations seem to introduce a bug since July 2024
+      run: |
+        pushd ${{ matrix.system.build_path }}
+        .\\build-and-test-win32-debug.bat
+        popd
+
+    - name: Build x64 Debug
+      # Switching to debug mode, since vs2022 optimizations seem to introduce a bug since July 2024
+      run: |
+        pushd ${{ matrix.system.build_path }}
+        .\\build-and-test-x64-debug.bat
+        popd
+
+    - name: Generate VS solution
+      run: |
+        pushd ".\\build\\visual"
+        .\\generate_vs2022.cmd
+        popd
+
+    - name: Upload generated VS2022 directory
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: VS2022-Build-Dir
+        path: "build/visual/Visual Studio 17 2022"
+
+    - name: Build executable with generated solution
+      run: cmake --build "build/visual/Visual Studio 17 2022" --config Debug
+
+    - name: Run minimal runtime test
+      run: |
+        & ".\\build\\visual\\Visual Studio 17 2022\\Debug\\lz4.exe" -vvV
+        & ".\\build\\visual\\Visual Studio 17 2022\\Debug\\lz4.exe" -bi1
+        & ".\\build\\visual\\Visual Studio 17 2022\\Debug\\lz4.exe" ".\\build\\visual\\Visual Studio 17 2022\\Debug\\lz4.exe"
+        & ".\\build\\visual\\Visual Studio 17 2022\\Debug\\lz4.exe" -t ".\\build\\visual\\Visual Studio 17 2022\\Debug\\lz4.exe.lz4"
+
+  meson:
+    name: Meson + Ninja
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Setup Python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.x'
+
+    - name: Install build tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install tree ninja-build meson
+
+    - name: Display environment info
+      run: |
+        type clang && which clang && clang --version
+        type python && which python && python --version
+        type meson && which meson && meson --version
+
+    - name: Configure build
+      # debug build (assertions), with some optimization : at -O0, test processing would dominate the job
+      run: >
+        meson setup
+        --fatal-meson-warnings
+        --buildtype=debug
+        -Doptimization=1
+        -Db_lundef=false
+        -Dauto_features=enabled
+        -Dprograms=true
+        -Dcontrib=true
+        -Dtests=true
+        -Dexamples=true
+        build/meson builddir
+
+    - name: Run tests
+      run: meson test -C builddir
+
+    - name: Test installation
+      run: |
+        cd builddir
+        DESTDIR=./staging ninja install
+        tree ./staging
+
+  meson-msvc:
+    name: Meson + Ninja (MSVC, shared library)
+    runs-on: windows-2022
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Setup Python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.x'
+
+    - name: Install build tools
+      run: python -m pip install meson ninja
+
+    - name: Configure build
+      # --vsenv locates and activates the MSVC environment (no VS Command Prompt needed)
+      # CC=cl prevents meson from picking up the gcc preinstalled on the runner
+      env:
+        CC: cl
+      run: >
+        meson setup
+        --vsenv
+        -Ddefault_library=shared
+        -Dossfuzz=false
+        -Dtests=true
+        build/meson builddir
+
+    - name: Build
+      run: meson compile -C builddir
+
+    - name: Unit tests
+      # only unittest : the other tests require the command line tool, or a POSIX shell
+      run: meson test -C builddir unittest --print-errorlogs
+
+    - name: Test installation
+      # MSVC only generates the import library lz4.lib if the DLL exports symbols,
+      # which requires LZ4_DLL_EXPORT=1 to reach the library sources (#1078)
+      run: |
+        meson install -C builddir --no-rebuild --destdir "${{ github.workspace }}\staging"
+        Get-ChildItem -Recurse -File staging | Select-Object -ExpandProperty FullName
+        if (-not (Get-ChildItem -Recurse -Filter lz4.lib staging)) { throw "import library lz4.lib was not installed" }

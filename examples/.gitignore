@@ -3,6 +3,7 @@
 /simple_buffer
 /frameCompress
 /fileCompress
+/fileRandomAccess
 /blockStreaming_doubleBuffer
 /blockStreaming_ringBuffer
 /streamingHC_ringBuffer
@@ -10,3 +11,4 @@
 /dictionaryRandomAccess
 /bench_functions
 /*.exe
+/*.lz4s*

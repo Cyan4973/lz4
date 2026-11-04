@@ -77,26 +77,29 @@ static void compress_round_trip(const uint8_t *data, size_t size,
     size_t compressedSize = headerSize;
 
     /* Compress data before uncompressed offset */
-    size_t lz4Return = LZ4F_compressUpdate(ctx, dst + compressedSize, dstCapacity,
+    size_t lz4Return = LZ4F_compressUpdate(ctx, dst + compressedSize, dstCapacity - compressedSize,
                                            data, uncompressedOffset, NULL);
     FUZZ_ASSERT(!LZ4F_isError(lz4Return));
     compressedSize += lz4Return;
 
     /* Add uncompressed data */
-    lz4Return = LZ4F_uncompressedUpdate(ctx, dst + compressedSize, dstCapacity,
-                                        uncompressedData, uncompressedSize, NULL);
+    LZ4F_compressOptions_t uncOpts;
+    memset(&uncOpts, 0, sizeof(uncOpts));
+    uncOpts.uncompressed = 1;
+    lz4Return = LZ4F_compressUpdate(ctx, dst + compressedSize, dstCapacity - compressedSize,
+                                    uncompressedData, uncompressedSize, &uncOpts);
     FUZZ_ASSERT(!LZ4F_isError(lz4Return));
     compressedSize += lz4Return;
 
     /* Compress data after uncompressed offset */
-    lz4Return = LZ4F_compressUpdate(ctx, dst + compressedSize, dstCapacity,
+    lz4Return = LZ4F_compressUpdate(ctx, dst + compressedSize, dstCapacity - compressedSize,
                                     data + uncompressedEndOffset,
                                     size - uncompressedEndOffset, NULL);
     FUZZ_ASSERT(!LZ4F_isError(lz4Return));
     compressedSize += lz4Return;
 
     /* Finish compression */
-    lz4Return = LZ4F_compressEnd(ctx, dst + compressedSize, dstCapacity, NULL);
+    lz4Return = LZ4F_compressEnd(ctx, dst + compressedSize, dstCapacity - compressedSize, NULL);
     FUZZ_ASSERT(!LZ4F_isError(lz4Return));
     compressedSize += lz4Return;
 
@@ -120,15 +123,10 @@ static void compress_round_trip(const uint8_t *data, size_t size,
     LZ4F_freeCompressionContext(ctx);
 }
 
-static void compress_independent_block_mode(const uint8_t *data, size_t size) {
-    FUZZ_dataProducer_t *producer = FUZZ_dataProducer_create(data, size);
-    LZ4F_preferences_t prefs = FUZZ_dataProducer_preferences(producer);
-    prefs.frameInfo.blockMode = LZ4F_blockIndependent;
-    compress_round_trip(data, size, producer, prefs);
-}
-
-
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
-    compress_independent_block_mode(data, size);
+    FUZZ_dataProducer_t *producer = FUZZ_dataProducer_create(data, size);
+    LZ4F_preferences_t prefs = FUZZ_dataProducer_preferences(producer);   /* linked or independent blocks */
+    prefs.nbWorkers = FUZZ_dataProducer_range32(producer, 0, 3);
+    compress_round_trip(data, size, producer, prefs);
     return 0;
 }
