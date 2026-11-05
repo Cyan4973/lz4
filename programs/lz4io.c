@@ -3147,10 +3147,10 @@ LZ4IO_getCompressedFileInfo(LZ4IO_cFileInfo_t* cfinfo, const char* input_filenam
                 int const errorNb = fseek_u32(finput, size, SEEK_CUR);
                 if (errorNb != 0)
                     END_PROCESS(43, "Stream error : cannot skip skippable area");
-                if (displayNow) DISPLAYOUT("    %6llu %14s %5s %8s %20u %20s %9s\n",
+                if (displayNow) DISPLAYOUT("    %6llu %14s %5s %8s %20llu %20s %9s\n",
                              cfinfo->frameCount + 1,
                              "SkippableFrame",
-                             "-", "-", size + 8, "-", "-");
+                             "-", "-", (unsigned long long)size + 8, "-", "-");
 
                 result = LZ4IO_LZ4F_OK;
             }
