@@ -85,6 +85,7 @@ static LZ4F_errorCode_t returnErrorCode(LZ4F_errorCodes code)
 #  define LZ4F_RESUME_SPAN (1 << 20)
 #endif
 #define LZ4F_SKIP_BUFFER_SIZE (64 << 10)
+#define LZ4F_SKIPPABLE_HEADER_SIZE 8   /* magic number, frame size : the shortest complete frame */
 
 typedef struct {
   unsigned long long cPos;       /* position within compressed data : start of a frame, or of a block */
@@ -132,7 +133,7 @@ static LZ4F_errorCode_t readAndParseHeader(LZ4_readFile_t* readFile, FILE* fp)
 
     /* Read the header from file */
     const size_t bytesRead = fread(headerBuf, 1, sizeof(headerBuf), fp);
-    if (bytesRead < 8) {   /* a skippable header is the shortest complete frame */
+    if (bytesRead < LZ4F_SKIPPABLE_HEADER_SIZE) {
         RETURN_ERROR(io_read);
     }
 
@@ -144,7 +145,7 @@ static LZ4F_errorCode_t readAndParseHeader(LZ4_readFile_t* readFile, FILE* fp)
       }
       readFile->hint = result;
     }
-    /* A normal frame needs an end mark, while an empty skippable frame is only 8 bytes. */
+    /* A normal frame needs an end mark, while an empty skippable frame is only its header. */
     if (frameInfo.frameType != LZ4F_skippableFrame
       && bytesRead < LZ4F_HEADER_SIZE_MIN + LZ4F_ENDMARK_SIZE) {
         RETURN_ERROR(io_read);
