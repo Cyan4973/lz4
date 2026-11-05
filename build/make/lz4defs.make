@@ -75,7 +75,6 @@ endif
 ifeq ($(WINBASED),yes)
 EXT        = .exe
 WINDRES ?= windres
-MCM_LDFLAGS += -Wl,--force-exe-suffix
 endif
 # executable suffix of multiconf.make, which detects only native Windows itself
 EXE = $(EXT)
