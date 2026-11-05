@@ -84,7 +84,7 @@ extern "C" {
 #  define LZ4FLIB_API LZ4FLIB_VISIBILITY
 #endif
 
-/* LZ4F_DEPRECATE(x) : deprecated enumerator x
+/* LZ4F_DEPRECATE(x) : deprecated enumerator or type x, replaced by LZ4F_##x
  * LZ4F_DEPRECATED(message) : precedes the declaration of a deprecated function */
 #ifdef LZ4F_DISABLE_DEPRECATE_WARNINGS
 #  define LZ4F_DEPRECATE(x) x
@@ -93,7 +93,7 @@ extern "C" {
 #  if defined(_MSC_VER)
 #    define LZ4F_DEPRECATE(x) x   /* __declspec(deprecated) x - only works with C++ */
 #  elif defined(__clang__) || (defined(__GNUC__) && (__GNUC__ >= 6))
-#    define LZ4F_DEPRECATE(x) x __attribute__((deprecated))
+#    define LZ4F_DEPRECATE(x) x __attribute__((deprecated("use LZ4F_" #x " instead")))
 #  else
 #    define LZ4F_DEPRECATE(x) x   /* no deprecation warning for this compiler */
 #  endif
@@ -175,10 +175,10 @@ typedef enum {
 } LZ4F_frameType_t;
 
 #ifdef LZ4F_ENABLE_OBSOLETE_ENUMS
-typedef LZ4F_blockSizeID_t blockSizeID_t;
-typedef LZ4F_blockMode_t blockMode_t;
-typedef LZ4F_frameType_t frameType_t;
-typedef LZ4F_contentChecksum_t contentChecksum_t;
+typedef LZ4F_blockSizeID_t LZ4F_DEPRECATE(blockSizeID_t);
+typedef LZ4F_blockMode_t LZ4F_DEPRECATE(blockMode_t);
+typedef LZ4F_frameType_t LZ4F_DEPRECATE(frameType_t);
+typedef LZ4F_contentChecksum_t LZ4F_DEPRECATE(contentChecksum_t);
 #endif
 
 /*! LZ4F_frameInfo_t :
