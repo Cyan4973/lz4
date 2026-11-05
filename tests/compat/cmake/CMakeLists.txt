@@ -29,3 +29,8 @@ target_link_libraries(decompress-partial LZ4::lz4_shared)
 # Add a test that builds against the lz4::lz4 target
 add_executable(decompress-partial-lz4 "${CMAKE_CURRENT_SOURCE_DIR}/decompress-partial.c")
 target_link_libraries(decompress-partial-lz4 lz4::lz4)
+
+# Compile installed public headers with only the exported include directories.
+# In particular, lz4file.h depends on lz4frame_static.h being installed too.
+add_library(installed-headers OBJECT installed-headers.c)
+target_link_libraries(installed-headers PRIVATE LZ4::lz4)

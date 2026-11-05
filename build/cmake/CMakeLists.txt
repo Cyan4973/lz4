@@ -365,6 +365,7 @@ if(NOT LZ4_BUNDLED_MODE)
     "${LZ4_LIB_SOURCE_DIR}/lz4hc.h"
     "${LZ4_LIB_SOURCE_DIR}/lz4frame.h"
     "${LZ4_LIB_SOURCE_DIR}/lz4file.h"
+    "${LZ4_LIB_SOURCE_DIR}/lz4frame_static.h"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
   install(FILES "${LZ4_PROG_SOURCE_DIR}/lz4.1"
     DESTINATION "${CMAKE_INSTALL_MANDIR}/man1")
