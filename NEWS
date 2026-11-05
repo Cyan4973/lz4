@@ -1,5 +1,6 @@
 v1.11.1
 perf : faster decompression on ppc64le (+24% at level 1, +20% at level 9 on POWER10) and on big-endian ppc64 (+17%, +12% on POWER9) : `LZ4_FAST_DEC_LOOP` enabled (silesia, gcc)
+fix  : `LZ4_resetStreamHC()` could write out of bounds at levels >= 10, on a state containing garbage (since v1.11.0)
 
 v1.11.0
 fix  : data corruption in valid usage : ring buffer decoding (`LZ4_decoderRingBufferSize()`, since v1.9.0), rare cases of streaming or `destSize` compression, one reported by @freedom-winds
