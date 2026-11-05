@@ -108,6 +108,21 @@ jobs:
         DESTDIR=./staging ninja install
         tree ./staging
 
+  meson-unstable-install:
+    name: Meson unstable shared-library installation
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Install build tools
+      run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+    - name: Build and install unstable shared library
+      run: |
+        meson setup build/meson build-unstable -Ddefault_library=shared -Dunstable=true -Dossfuzz=false --prefix=/usr --libdir=lib
+        meson install -C build-unstable --destdir "$PWD/staging"
+    - name: Compile installed file API consumer
+      run: |
+        cc -I "$PWD/staging/usr/include" -c tests/compat/file-api-header.c -o file-api-header.o
+
   meson-msvc:
     name: Meson + Ninja (MSVC, shared library)
     runs-on: windows-2022

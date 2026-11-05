@@ -151,9 +151,9 @@ install_headers(
   lz4_source_root / 'lib/lz4frame.h'
 )
 
-if get_option('default_library') != 'shared'
+if get_option('default_library') != 'shared' or get_option('unstable')
   install_headers(lz4_source_root / 'lib/lz4frame_static.h')
-  if get_option('unstable')
-    install_headers(lz4_source_root / 'lib/lz4file.h')
-  endif
+endif
+if get_option('unstable')
+  install_headers(lz4_source_root / 'lib/lz4file.h')
 endif
