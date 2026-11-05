@@ -40,6 +40,11 @@ lz4 -f $FPREFIX-hw $FPREFIX-hw.lz4
 test ! $FPREFIX-hw.lz4 -nt $FPREFIX-hw  # keeps modification time
 lz4 -l -f $FPREFIX-hw $FPREFIX-hw.lz4
 test ! $FPREFIX-hw.lz4 -nt $FPREFIX-hw  # same with legacy format
+if [ "$(uname)" = Linux ]; then   # sub-second precision
+    touch -d @1600000000.123456789 $FPREFIX-hw
+    lz4 -f $FPREFIX-hw $FPREFIX-hw.lz4
+    test "$(stat -c %y $FPREFIX-hw.lz4)" = "$(stat -c %y $FPREFIX-hw)"
+fi
 rm $FPREFIX-hw.lz4
 case "$(uname)" in MINGW*|MSYS*|CYGWIN*) ;; *)
     # output of a private source stays private while it is written :
