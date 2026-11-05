@@ -906,6 +906,7 @@ int main(int argCount, const char** argv)
     /* Refuse to use the console as input */
     if (!strcmp(input_filename, stdinmark) && IS_CONSOLE(stdin) ) {
         DISPLAYLEVEL(1, "refusing to read from a console\n");
+        DISPLAYLEVEL(1, "For help, type: %s -h\n", exeName);
         exit(1);
     }
 
