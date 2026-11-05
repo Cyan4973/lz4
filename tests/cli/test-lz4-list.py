@@ -166,6 +166,23 @@ class TestVerbose(unittest.TestCase):
                                  self.cvinfo.frame_list[i]["line"])
 
 
+
+class TestLargeSkippable(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "requires sparse temporary files")
+    def test_verbose_size_includes_header_without_wrapping(self):
+        for payload_size in [(1 << 32) - 8, (1 << 32) - 1]:
+            with tempfile.NamedTemporaryFile(prefix="tmp-lz4-list-large-", suffix=".lz4") as stream:
+                stream.write(bytes([80, 42, 77, 24]) + payload_size.to_bytes(4, "little"))
+                # Sparse payload: even the largest legal frame occupies only a few blocks.
+                stream.seek(payload_size + 7)
+                stream.write(b"\0")
+                stream.flush()
+                output = execute(f"{LZ4} --list -v {stream.name}")
+                frames = [line.split() for line in output if "SkippableFrame" in line]
+                self.assertEqual(len(frames), 1, output)
+                self.assertEqual(frames[0][4], str(payload_size + 8), output)
+
+
 def to_human(size):
     for unit in ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y']:
         if size < 1024.0:
