@@ -298,6 +298,7 @@ LZ4LIB_API LZ4_streamHC_t* LZ4_initStreamHC(void* buffer, size_t size);
  * Replaced by LZ4_initStreamHC(), which initializes a memory segment containing arbitrary garbage data,
  * followed by LZ4_resetStreamHC_fast() to select the compression level.
  * LZ4_resetStreamHC_fast() alone is the recommended function to start a new stream of blocks.
+ * LZ4_resetStreamHC() initializes @streamHCPtr as a state of sizeof(LZ4_streamHC_t) bytes, which may contain garbage.
  */
 LZ4_DEPRECATED("use LZ4_initStreamHC() and LZ4_resetStreamHC_fast() instead") LZ4LIB_API void LZ4_resetStreamHC (LZ4_streamHC_t* streamHCPtr, int compressionLevel);
 

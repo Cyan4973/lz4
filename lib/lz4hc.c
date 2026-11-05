@@ -1688,10 +1688,10 @@ static size_t LZ4HC_sizeofState(const LZ4_streamHC_t* s)
     return s->internal_donotuse.hasWorkspace ? LZ4_STREAMHC_EXTSIZE : sizeof(*s);
 }
 
-/* just a stub */
+/* initializes arbitrary data, as LZ4_initStreamHC() : its extension marker can't be trusted */
 void LZ4_resetStreamHC (LZ4_streamHC_t* LZ4_streamHCPtr, int compressionLevel)
 {
-    LZ4_initStreamHC(LZ4_streamHCPtr, LZ4HC_sizeofState(LZ4_streamHCPtr));
+    LZ4_initStreamHC(LZ4_streamHCPtr, sizeof(*LZ4_streamHCPtr));
     LZ4_setCompressionLevel(LZ4_streamHCPtr, compressionLevel);
 }
 
