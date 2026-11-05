@@ -1,5 +1,6 @@
 v1.11.1
 fix  : `LZ4_resetStreamHC()` could write out of bounds at levels >= 10, on a state containing garbage (since v1.11.0)
+perf : faster decompression on ppc64 (+12% to +24% on silesia), `LZ4_FAST_DEC_LOOP` enabled, by @runlevel5
 cli  : help (`-h`, `-H`, `--help`) outputs to stdout, requested by @tansy
 
 v1.11.0
