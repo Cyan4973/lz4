@@ -2930,10 +2930,11 @@ LZ4IO_skipBlocksData(FILE* finput,
             return 0;
         }
         totalBlocksSize += LZ4F_BLOCK_HEADER_SIZE;
-        {   const unsigned long nextCBlockSize = LZ4IO_readLE32(&blockInfo) & 0x7FFFFFFFU;
+        {   const unsigned long blockHeader = LZ4IO_readLE32(&blockInfo);
+            const unsigned long nextCBlockSize = blockHeader & 0x7FFFFFFFU;
             const unsigned long nextBlock = nextCBlockSize + (blockChecksumFlag * LZ4F_BLOCK_CHECKSUM_SIZE);
-            if (nextCBlockSize == 0) {
-                /* Reached EndMark */
+            if (blockHeader == 0) {
+                /* Reached EndMark (0x80000000 is an empty uncompressed block instead) */
                 if (contentChecksumFlag) {
                     /* Skip content checksum */
                     if (fread(blockInfo, 1, LZ4F_CONTENT_CHECKSUM_SIZE, finput) != LZ4F_CONTENT_CHECKSUM_SIZE) {

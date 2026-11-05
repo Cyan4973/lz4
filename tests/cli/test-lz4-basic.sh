@@ -117,6 +117,9 @@ lz4 -t $FPREFIX-bigblock.lz4 && exit 1      # must fail: block larger than the f
 lz4 --list $FPREFIX-bigblock.lz4 && exit 1  # must fail, like -t
 { cat $FPREFIX-hdr; printf '\377\377\377\177'; } > $FPREFIX-bigblock.lz4
 lz4 --list $FPREFIX-bigblock.lz4 && exit 1 || test $? -eq 1  # must fail cleanly: 2 GB block, beyond LONG_MAX of a 32-bit long
+{ cat $FPREFIX-hdr; printf '\000\000\000\200\005\000\000\200hello\000\000\000\000'; } > $FPREFIX-empty.lz4
+lz4 -t $FPREFIX-empty.lz4
+lz4 --list $FPREFIX-empty.lz4  # empty uncompressed block (0x80000000) : not an EndMark
 cat $FPREFIX-hw >> $FPREFIX-hw.lz4
 lz4 -f $FPREFIX-hw.lz4 && exit 1      # uncompress valid frame followed by invalid data (must fail now)
 printf '\120\052\115\030\000\000\000\000BAD!' > $FPREFIX-bad.lz4
