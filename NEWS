@@ -1,5 +1,6 @@
 v1.11.1
 fix  : `LZ4_resetStreamHC()` could write out of bounds at levels >= 10, on a state containing garbage (since v1.11.0)
+cli  : help (`-h`, `-H`, `--help`) outputs to stdout, requested by @tansy
 
 v1.11.0
 fix  : data corruption in valid usage : ring buffer decoding (`LZ4_decoderRingBufferSize()`, since v1.9.0), rare cases of streaming or `destSize` compression, one reported by @freedom-winds
