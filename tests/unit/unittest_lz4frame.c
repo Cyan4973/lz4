@@ -1766,6 +1766,30 @@ TEST(lz4file_readOpen_shortFiles)
     }
 }
 
+/* A complete skippable frame can be only 8, 9 or 10 bytes long. */
+TEST(lz4file_readOpen_shortSkippable)
+{
+    unsigned payloadSize, magic;
+    for (magic = 0; magic < 16; magic++)
+    for (payloadSize = 0; payloadSize < 4; payloadSize++) {
+        BYTE frame[11] = { 0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0, 1, 2, 3 };
+        FILE* const file = newTmpFile();
+        LZ4_readFile_t* readCtx = NULL;
+        char decoded[1];
+        frame[0] += (BYTE)magic;
+        frame[4] = (BYTE)payloadSize;
+        ASSERT_EQ(fwrite(frame, 1, 8 + payloadSize, file), 8 + payloadSize);
+        rewind(file);
+        LZ4F_OK(LZ4F_readOpen(&readCtx, file));
+        ASSERT_EQ(LZ4F_read(readCtx, decoded, sizeof(decoded)), 0);
+        ASSERT_EQ(LZ4F_tell(readCtx), 0);
+        LZ4F_OK(LZ4F_seek(readCtx, 0, SEEK_SET));
+        ASSERT_EQ(LZ4F_read(readCtx, decoded, sizeof(decoded)), 0);
+        LZ4F_OK(LZ4F_readClose(readCtx));
+        UT_release(file);
+    }
+}
+
 #if defined(__linux__)
 /* write failures are reported by the function writing : LZ4F_writeOpen() for the header,
  * LZ4F_writeClose() for the end of frame */
