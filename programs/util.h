@@ -247,9 +247,9 @@ UTIL_STATIC int UTIL_setFileStat(const char *filename, stat_t *statbuf)
         res += utime(filename, &timebuf);  /* set access and modification times */
 #else
         struct timespec timebuf[2];
-        memset(timebuf, 0, sizeof(timebuf));
+        timebuf[0].tv_sec  = 0;         /* tv_sec ignored when tv_nsec == UTIME_NOW */
         timebuf[0].tv_nsec = UTIME_NOW;
-        timebuf[1].tv_sec = statbuf->st_mtime;
+        timebuf[1]         = statbuf->st_mtim;  /* preserve sub-second precision */
         res += utimensat(AT_FDCWD, filename, timebuf, 0);  /* set access and modification times */
 #endif
     }
