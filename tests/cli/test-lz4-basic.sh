@@ -69,6 +69,25 @@ cp $FPREFIX-same.lz4 $FPREFIX-same.lz4.orig
 lz4 -d -f $FPREFIX-same.lz4 $FPREFIX-same.lz4 && exit 1
 cmp $FPREFIX-same.lz4 $FPREFIX-same.lz4.orig
 case "$(uname)" in MINGW*|MSYS*|CYGWIN*) ;; *)
+    # An unreadable destination still exists; checking by opening it for reading misses it.
+    echo "keep this output" > $FPREFIX-writeonly
+    cp $FPREFIX-writeonly $FPREFIX-writeonly.orig
+    chmod 200 $FPREFIX-writeonly
+    if [ ! -r $FPREFIX-writeonly ]; then   # root can read it anyway
+        lz4 -q $FPREFIX-same $FPREFIX-writeonly && exit 1
+    fi
+    chmod 600 $FPREFIX-writeonly
+    cmp $FPREFIX-writeonly $FPREFIX-writeonly.orig
+    # A dangling output link must not create its target without overwrite authorization.
+    ln -s $FPREFIX-absent $FPREFIX-dangling
+    lz4 -q $FPREFIX-same $FPREFIX-dangling && exit 1
+    test ! -f $FPREFIX-absent
+    lz4 -f $FPREFIX-same $FPREFIX-dangling
+    lz4 -d -c $FPREFIX-absent | cmp $FPREFIX-same -
+    printf 'n\n' | lz4 $FPREFIX-same $FPREFIX-writeonly && exit 1
+    cmp $FPREFIX-writeonly $FPREFIX-writeonly.orig
+    printf 'y\n' | lz4 $FPREFIX-same $FPREFIX-writeonly
+    lz4 -d -c $FPREFIX-writeonly | cmp $FPREFIX-same -
     # idem through a link
     ln $FPREFIX-same $FPREFIX-same.hard
     lz4 -f $FPREFIX-same $FPREFIX-same.hard && exit 1
