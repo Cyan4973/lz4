@@ -1388,6 +1388,32 @@ TEST(decompress_invalidAndEmptyBlocks)
     }
 }
 
+/* a block larger than the frame's maximum block size is rejected as soon as its size is read, compressed or not ;
+ * a block of exactly the maximum size is accepted, and waits for its content */
+TEST(decompress_blockSizeLimit)
+{
+    static const LZ4F_blockSizeID_t ids[] = { LZ4F_max64KB, LZ4F_max256KB, LZ4F_max1MB, LZ4F_max4MB };
+    size_t i, extra, raw;
+    for (i = 0; i < ARRAY_SIZE(ids); i++)
+    for (extra = 0; extra <= 1; extra++)
+    for (raw = 0; raw <= 1; raw++) {
+        LZ4F_preferences_t prefs = LZ4F_INIT_PREFERENCES;
+        BYTE frame[LZ4F_HEADER_SIZE_MAX + 4];
+        BYTE decoded[16];
+        size_t frameSize, dSize = sizeof(decoded), r;
+        prefs.frameInfo.blockSizeID = ids[i];
+        frameSize = LZ4F_OK(LZ4F_compressBegin(newCctx(), frame, LZ4F_HEADER_SIZE_MAX, &prefs));
+        writeLE32(frame + frameSize, (unsigned)(LZ4F_getBlockSize(ids[i]) + extra) | (raw ? 0x80000000U : 0));
+        frameSize += 4;
+        r = LZ4F_decompress(newDctx(), decoded, &dSize, frame, &frameSize, NULL);
+        if (extra) {
+            ASSERT_LZ4F_ERROR(r, LZ4F_ERROR_maxBlockSize_invalid);
+        } else {
+            ASSERT(LZ4F_OK(r) > 0);
+        }
+    }
+}
+
 /* a frame abandoned in the middle of a block (output pending within the context), then a reset :
  * the next frame doesn't output anything from the abandoned one */
 TEST(decompress_resetPendingOutput)
