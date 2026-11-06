@@ -1388,6 +1388,81 @@ TEST(decompress_invalidAndEmptyBlocks)
     }
 }
 
+/* A block's stored size must not exceed the maximum advertised by the frame,
+ * whether the block is compressed or raw, and whether its size field is split.
+ * The exact maximum is accepted, but still needs its payload; an oversized size
+ * is rejected as soon as all four size bytes are available, without a payload. */
+TEST(decompress_blockSizeLimit)
+{
+    static const struct { LZ4F_blockSizeID_t id; unsigned size; } limits[] = {
+        { LZ4F_max64KB, 64 KB }, { LZ4F_max256KB, 256 KB },
+        { LZ4F_max1MB, 1 MB }, { LZ4F_max4MB, 4 MB }
+    };
+    static const size_t outputSizes[] = { 0, 16 };
+    static const BYTE emptyFrame[] = { 0x04, 0x22, 0x4D, 0x18, 0x60, 0x40, 0x82, 0, 0, 0, 0 };
+    size_t bi, si, raw, split, oi;
+    for (bi = 0; bi < ARRAY_SIZE(limits); bi++) {
+        LZ4F_preferences_t prefs = LZ4F_INIT_PREFERENCES;
+        LZ4F_cctx* const cctx = newCctx();
+        BYTE header[LZ4F_HEADER_SIZE_MAX];
+        size_t headerSize;
+        prefs.frameInfo.blockSizeID = limits[bi].id;
+        headerSize = LZ4F_OK(LZ4F_compressBegin(cctx, header, sizeof(header), &prefs));
+        UT_release(cctx);
+        for (si = 0; si < 3; si++) {
+            unsigned const blockSize = si == 2 ? 0x7FFFFFFFU : limits[bi].size + (unsigned)si;
+            for (raw = 0; raw <= 1; raw++) {
+                BYTE blockHeader[4];
+                writeLE32(blockHeader, blockSize | (raw ? 0x80000000U : 0));
+                for (split = 0; split <= sizeof(blockHeader); split++)
+                for (oi = 0; oi < ARRAY_SIZE(outputSizes); oi++) {
+                    size_t const firstSize = headerSize + split;
+                    size_t const lastSize = sizeof(blockHeader) - split;
+                    BYTE* const first = (BYTE*)UT_malloc(firstSize);
+                    BYTE* const last = lastSize ? (BYTE*)UT_malloc(lastSize) : NULL;
+                    LZ4F_dctx* const dctx = newDctx();
+                    BYTE decoded[16], untouched[16];
+                    size_t cSize = firstSize, dSize = outputSizes[oi], r;
+                    memcpy(first, header, headerSize);
+                    memcpy(first + headerSize, blockHeader, split);
+                    memset(untouched, 0xA5, sizeof(untouched));
+                    memcpy(decoded, untouched, sizeof(decoded));
+                    r = LZ4F_decompress(dctx, decoded, &dSize, first, &cSize, NULL);
+                    ASSERT(cSize <= firstSize);
+                    ASSERT_EQ(dSize, 0);
+                    ASSERT_MEMEQ(decoded, untouched, sizeof(decoded));
+                    if (lastSize) {
+                        ASSERT(LZ4F_OK(r) > 0);   /* incomplete size field */
+                        ASSERT_EQ(cSize, firstSize);
+                        memcpy(last, blockHeader + split, lastSize);
+                        cSize = lastSize;
+                        dSize = outputSizes[oi];
+                        r = LZ4F_decompress(dctx, decoded, &dSize, last, &cSize, NULL);
+                        ASSERT(cSize <= lastSize);
+                        ASSERT_EQ(dSize, 0);
+                        ASSERT_MEMEQ(decoded, untouched, sizeof(decoded));
+                    }
+                    if (si == 0) {
+                        ASSERT(LZ4F_OK(r) > 0);   /* maximum-sized block, payload not provided */
+                    } else {
+                        ASSERT_LZ4F_ERROR(r, LZ4F_ERROR_maxBlockSize_invalid);
+                    }
+                    LZ4F_resetDecompressionContext(dctx);
+                    cSize = sizeof(emptyFrame);
+                    dSize = sizeof(decoded);
+                    ASSERT_EQ(LZ4F_OK(LZ4F_decompress(dctx, decoded, &dSize, emptyFrame, &cSize, NULL)), 0);
+                    ASSERT_EQ(cSize, sizeof(emptyFrame));
+                    ASSERT_EQ(dSize, 0);
+                    ASSERT_MEMEQ(decoded, untouched, sizeof(decoded));
+                    UT_release(dctx);
+                    if (last != NULL) UT_release(last);
+                    UT_release(first);
+                }
+            }
+        }
+    }
+}
+
 /* a frame abandoned in the middle of a block (output pending within the context), then a reset :
  * the next frame doesn't output anything from the abandoned one */
 TEST(decompress_resetPendingOutput)
