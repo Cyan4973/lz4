@@ -519,6 +519,7 @@ static FILE*
 LZ4IO_openDstFile(const char* dstFileName, const LZ4IO_prefs_t* const prefs, const char* srcFileName)
 {
     FILE* f;
+    int overwrite = prefs->overwrite;
     assert(dstFileName != NULL);
 
     if (LZ4IO_isStdout(dstFileName)) {
@@ -549,18 +550,25 @@ LZ4IO_openDstFile(const char* dstFileName, const LZ4IO_prefs_t* const prefs, con
                         DISPLAY("    not overwritten  \n");
                         return NULL;
                     }
+                    overwrite = 1;
                     while ((ch!=EOF) && (ch!='\n')) ch = getchar();  /* flush rest of input line */
         }   }   }
 #if PLATFORM_POSIX_VERSION >= 1
-        /* a new file stays private until the source's permissions are copied, once it is complete */
-        if (srcFileName != NULL && !LZ4IO_isStdin(srcFileName) && !LZ4IO_isDevNull(dstFileName)
-          && UTIL_isRegFile(srcFileName)) {
-            int const fd = open(dstFileName, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+        {
+            int const flags = O_WRONLY | O_CREAT
+                            | ((overwrite || LZ4IO_isDevNull(dstFileName)) ? O_TRUNC : O_EXCL);
+            /* a new file stays private until the source's permissions are copied, once it is complete */
+            int const mode = (srcFileName != NULL && !LZ4IO_isStdin(srcFileName)
+                           && !LZ4IO_isDevNull(dstFileName) && UTIL_isRegFile(srcFileName))
+                           ? (S_IRUSR | S_IWUSR) : 0666;
+            int const fd = open(dstFileName, flags, mode);
             f = (fd < 0) ? NULL : fdopen(fd, "wb");
             if (f == NULL && fd >= 0) close(fd);
-        } else
-#endif
+        }
+#else
+        (void)overwrite;
         f = fopen( dstFileName, "wb" );
+#endif
         if (f==NULL) DISPLAYLEVEL(1, "%s: %s\n", dstFileName, strerror(errno));
     }
 
