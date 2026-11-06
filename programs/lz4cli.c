@@ -582,7 +582,12 @@ int main(int argCount, const char** argv)
                 if (!strcmp(argument,  "--force")) { LZ4IO_setOverwrite(prefs, 1); continue; }
                 if (!strcmp(argument,  "--no-force")) { LZ4IO_setOverwrite(prefs, 0); continue; }
                 if ((!strcmp(argument, "--stdout"))
-                    || (!strcmp(argument, "--to-stdout"))) { forceStdout=1; output_filename=stdoutmark; continue; }
+                    || (!strcmp(argument, "--to-stdout"))) {
+                    forceStdout=1;
+                    output_filename=stdoutmark;
+                    LZ4IO_setPassThrough(prefs, 1);
+                    continue;
+                }
                 if (!strcmp(argument,  "--frame-crc")) { LZ4IO_setStreamChecksumMode(prefs, 1); BMK_skipChecksums(0); frameCrcRequested=1; continue; }
                 if (!strcmp(argument,  "--no-frame-crc")) { LZ4IO_setStreamChecksumMode(prefs, 0); BMK_skipChecksums(1); continue; }
                 if (!strcmp(argument,  "--no-crc")) { LZ4IO_setStreamChecksumMode(prefs, 0); LZ4IO_setBlockChecksumMode(prefs, 0); BMK_skipChecksums(1); continue; }
